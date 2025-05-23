@@ -1,0 +1,57 @@
+# Dependencies
+/node_modules
+/frontend/node_modules
+/backend/vendor
+
+# Build output
+/dist
+/public/build
+/frontend/dist
+/backend/bin
+/backend/*.exe
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Operating System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Test output
+/coverage
+/reports
+junit.xml
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Vite specific
+.vite
+/frontend/.vite
+
+# Vue CLI specific
+/frontend/public/hot-update.json
+
+# Go specific
+*.out
+*.test
+/backend/vendor/
+/backend/pkg/
+/backend/cover.out
