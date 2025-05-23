@@ -89,6 +89,52 @@ const routes = [
     component: () => import('@/views/GroupDetailView.vue'),
     props: true
   },
+  // Action Template Routes
+  {
+    path: '/actiontemplates',
+    name: 'ActionTemplatesView',
+    component: () => import('@/views/ActionTemplatesView.vue')
+  },
+  {
+    path: '/actiontemplates/new',
+    name: 'ActionTemplateCreate',
+    component: () => import('@/views/ActionTemplateCreateView.vue')
+  },
+  {
+    path: '/actiontemplates/:id/edit',
+    name: 'ActionTemplateEdit',
+    component: () => import('@/views/ActionTemplateEditView.vue'),
+    props: true
+  },
+  {
+    path: '/actiontemplates/:id',
+    name: 'ActionTemplateDetail',
+    component: () => import('@/views/ActionTemplateDetailView.vue'),
+    props: true
+  },
+  // Workflow Routes
+  {
+    path: '/workflows',
+    name: 'WorkflowsView',
+    component: () => import('@/views/WorkflowsView.vue')
+  },
+  {
+    path: '/workflows/new',
+    name: 'WorkflowCreate',
+    component: () => import('@/views/WorkflowCreateView.vue')
+  },
+  {
+    path: '/workflows/:id/edit',
+    name: 'WorkflowEdit',
+    component: () => import('@/views/WorkflowEditView.vue'),
+    props: true
+  },
+  {
+    path: '/workflows/:id',
+    name: 'WorkflowDetail',
+    component: () => import('@/views/WorkflowDetailView.vue'),
+    props: true
+  },
   // Fallback route for 404
   {
     path: '/:catchAll(.*)',

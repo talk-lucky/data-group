@@ -70,6 +70,26 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 		groupDefinitionRoutes.PUT("/:group_id", a.updateGroupDefinitionHandler)
 		groupDefinitionRoutes.DELETE("/:group_id", a.deleteGroupDefinitionHandler)
 	}
+
+	// Workflow Definition Routes
+	workflowRoutes := v1.Group("/workflows")
+	{
+		workflowRoutes.POST("/", a.createWorkflowDefinitionHandler)
+		workflowRoutes.GET("/", a.listWorkflowDefinitionsHandler)
+		workflowRoutes.GET("/:workflow_id", a.getWorkflowDefinitionHandler)
+		workflowRoutes.PUT("/:workflow_id", a.updateWorkflowDefinitionHandler)
+		workflowRoutes.DELETE("/:workflow_id", a.deleteWorkflowDefinitionHandler)
+	}
+
+	// Action Template Routes
+	actionTemplateRoutes := v1.Group("/actiontemplates")
+	{
+		actionTemplateRoutes.POST("/", a.createActionTemplateHandler)
+		actionTemplateRoutes.GET("/", a.listActionTemplatesHandler)
+		actionTemplateRoutes.GET("/:template_id", a.getActionTemplateHandler)
+		actionTemplateRoutes.PUT("/:template_id", a.updateActionTemplateHandler)
+		actionTemplateRoutes.DELETE("/:template_id", a.deleteActionTemplateHandler)
+	}
 }
 
 // --- Entity Handlers ---
@@ -136,6 +156,128 @@ func (a *API) deleteEntityHandler(c *gin.Context) {
 	err := a.store.DeleteEntity(entityID)
 	if err != nil {
 		handleStoreError(c, err, "Entity")
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
+}
+
+// --- WorkflowDefinition Handlers ---
+
+func (a *API) createWorkflowDefinitionHandler(c *gin.Context) {
+	var req WorkflowDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	req.ID = "" // Set by store
+	workflow, err := a.store.CreateWorkflowDefinition(req)
+	if err != nil {
+		handleStoreError(c, err, "Workflow Definition")
+		return
+	}
+	c.JSON(http.StatusCreated, workflow)
+}
+
+func (a *API) listWorkflowDefinitionsHandler(c *gin.Context) {
+	workflows, err := a.store.ListWorkflowDefinitions()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list workflow definitions: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, workflows)
+}
+
+func (a *API) getWorkflowDefinitionHandler(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	workflow, err := a.store.GetWorkflowDefinition(workflowID)
+	if err != nil {
+		handleStoreError(c, err, "Workflow Definition")
+		return
+	}
+	c.JSON(http.StatusOK, workflow)
+}
+
+func (a *API) updateWorkflowDefinitionHandler(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	var req WorkflowDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	workflow, err := a.store.UpdateWorkflowDefinition(workflowID, req)
+	if err != nil {
+		handleStoreError(c, err, "Workflow Definition")
+		return
+	}
+	c.JSON(http.StatusOK, workflow)
+}
+
+func (a *API) deleteWorkflowDefinitionHandler(c *gin.Context) {
+	workflowID := c.Param("workflow_id")
+	err := a.store.DeleteWorkflowDefinition(workflowID)
+	if err != nil {
+		handleStoreError(c, err, "Workflow Definition")
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
+}
+
+// --- ActionTemplate Handlers ---
+
+func (a *API) createActionTemplateHandler(c *gin.Context) {
+	var req ActionTemplate
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	req.ID = "" // Set by store
+	template, err := a.store.CreateActionTemplate(req)
+	if err != nil {
+		handleStoreError(c, err, "Action Template")
+		return
+	}
+	c.JSON(http.StatusCreated, template)
+}
+
+func (a *API) listActionTemplatesHandler(c *gin.Context) {
+	templates, err := a.store.ListActionTemplates()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list action templates: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, templates)
+}
+
+func (a *API) getActionTemplateHandler(c *gin.Context) {
+	templateID := c.Param("template_id")
+	template, err := a.store.GetActionTemplate(templateID)
+	if err != nil {
+		handleStoreError(c, err, "Action Template")
+		return
+	}
+	c.JSON(http.StatusOK, template)
+}
+
+func (a *API) updateActionTemplateHandler(c *gin.Context) {
+	templateID := c.Param("template_id")
+	var req ActionTemplate
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	template, err := a.store.UpdateActionTemplate(templateID, req)
+	if err != nil {
+		handleStoreError(c, err, "Action Template")
+		return
+	}
+	c.JSON(http.StatusOK, template)
+}
+
+func (a *API) deleteActionTemplateHandler(c *gin.Context) {
+	templateID := c.Param("template_id")
+	err := a.store.DeleteActionTemplate(templateID)
+	if err != nil {
+		handleStoreError(c, err, "Action Template")
 		return
 	}
 	c.JSON(http.StatusNoContent, nil)

@@ -39,7 +39,10 @@ func main() {
 	metadataServiceURL := getEnv("METADATA_SERVICE_URL", "http://localhost:8080")
 	metadataClient := NewHTTPMetadataClient(metadataServiceURL)
 
-	groupingService := NewGroupingService(metadataClient, db)
+	orchestrationServiceURL := getEnv("ORCHESTRATION_SERVICE_URL", "http://localhost:8084")
+	orchestrationClient := NewHTTPOrchestrationClient(orchestrationServiceURL)
+
+	groupingService := NewGroupingService(metadataClient, orchestrationClient, db)
 
 	// --- HTTP Server Setup ---
 	router := gin.Default()

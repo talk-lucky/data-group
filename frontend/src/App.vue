@@ -7,6 +7,8 @@
       <v-btn text to="/entities">Entities</v-btn>
       <v-btn text to="/datasources">Data Sources</v-btn>
       <v-btn text to="/groups">Groups</v-btn>
+      <v-btn text to="/actiontemplates">Action Templates</v-btn>
+      <v-btn text to="/workflows">Workflows</v-btn>
       <!-- Add other navigation items here if needed -->
     </v-app-bar>
 

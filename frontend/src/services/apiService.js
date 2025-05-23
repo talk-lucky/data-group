@@ -104,6 +104,20 @@ export const deleteFieldMapping = (sourceId, mappingId) => {
   deleteGroupDefinition: (groupId) => apiClient.delete(`/groups/${groupId}`),
   calculateGroup: (groupId) => apiClient.post(`/groups/${groupId}/calculate`),
   getGroupResults: (groupId) => apiClient.get(`/groups/${groupId}/results`),
+
+  // Workflow Definition Endpoints
+  getWorkflows: () => apiClient.get('/workflows'),
+  getWorkflowById: (workflowId) => apiClient.get(`/workflows/${workflowId}`),
+  createWorkflow: (workflowData) => apiClient.post('/workflows', workflowData),
+  updateWorkflow: (workflowId, workflowData) => apiClient.put(`/workflows/${workflowId}`, workflowData),
+  deleteWorkflow: (workflowId) => apiClient.delete(`/workflows/${workflowId}`),
+
+  // Action Template Endpoints
+  getActionTemplates: () => apiClient.get('/actiontemplates'),
+  getActionTemplateById: (templateId) => apiClient.get(`/actiontemplates/${templateId}`),
+  createActionTemplate: (templateData) => apiClient.post('/actiontemplates', templateData),
+  updateActionTemplate: (templateId, templateData) => apiClient.put(`/actiontemplates/${templateId}`, templateData),
+  deleteActionTemplate: (templateId) => apiClient.delete(`/actiontemplates/${templateId}`),
 };
 
 

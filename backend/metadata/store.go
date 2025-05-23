@@ -12,20 +12,24 @@ import (
 type Store struct {
 	entities      map[string]EntityDefinition
 	attributes    map[string]map[string]AttributeDefinition // Key: EntityID, Key: AttributeID
-	dataSources      map[string]DataSourceConfig
-	fieldMappings    map[string]map[string]DataSourceFieldMapping // Key: SourceID, Key: MappingID
-	groupDefinitions map[string]GroupDefinition                   // Key: GroupDefinitionID
-	mu               sync.RWMutex
+	dataSources         map[string]DataSourceConfig
+	fieldMappings       map[string]map[string]DataSourceFieldMapping // Key: SourceID, Key: MappingID
+	groupDefinitions    map[string]GroupDefinition                   // Key: GroupDefinitionID
+	workflowDefinitions map[string]WorkflowDefinition                // Key: WorkflowDefinitionID
+	actionTemplates     map[string]ActionTemplate                    // Key: ActionTemplateID
+	mu                  sync.RWMutex
 }
 
 // NewStore creates and returns a new Store.
 func NewStore() *Store {
 	return &Store{
-		entities:         make(map[string]EntityDefinition),
-		attributes:       make(map[string]map[string]AttributeDefinition),
-		dataSources:      make(map[string]DataSourceConfig),
-		fieldMappings:    make(map[string]map[string]DataSourceFieldMapping),
-		groupDefinitions: make(map[string]GroupDefinition),
+		entities:            make(map[string]EntityDefinition),
+		attributes:          make(map[string]map[string]AttributeDefinition),
+		dataSources:         make(map[string]DataSourceConfig),
+		fieldMappings:       make(map[string]map[string]DataSourceFieldMapping),
+		groupDefinitions:    make(map[string]GroupDefinition),
+		workflowDefinitions: make(map[string]WorkflowDefinition),
+		actionTemplates:     make(map[string]ActionTemplate),
 	}
 }
 
@@ -130,6 +134,200 @@ func (s *Store) DeleteEntity(id string) error {
 
 	delete(s.entities, id)
 	delete(s.attributes, id) // Also delete associated attributes
+	return nil
+}
+
+// --- WorkflowDefinition Methods ---
+
+// CreateWorkflowDefinition adds a new workflow definition to the store.
+func (s *Store) CreateWorkflowDefinition(def WorkflowDefinition) (WorkflowDefinition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if def.Name == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow name cannot be empty")
+	}
+	if def.TriggerType == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_type cannot be empty")
+	}
+	if def.TriggerConfig == "" { // Basic validation, could be more specific JSON check
+		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_config cannot be empty")
+	}
+	if def.ActionSequenceJSON == "" { // Basic validation
+		return WorkflowDefinition{}, fmt.Errorf("workflow action_sequence_json cannot be empty")
+	}
+	// Add more validation for TriggerConfig and ActionSequenceJSON (e.g., JSON validity) if needed.
+
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	def.ID = id
+	def.CreatedAt = now
+	def.UpdatedAt = now
+	// IsEnabled defaults to false if not provided, which is fine.
+
+	s.workflowDefinitions[id] = def
+	return def, nil
+}
+
+// GetWorkflowDefinition retrieves a workflow definition by its ID.
+func (s *Store) GetWorkflowDefinition(id string) (WorkflowDefinition, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	wd, ok := s.workflowDefinitions[id]
+	if !ok {
+		return WorkflowDefinition{}, fmt.Errorf("workflow definition with ID %s not found", id)
+	}
+	return wd, nil
+}
+
+// ListWorkflowDefinitions retrieves all workflow definitions.
+func (s *Store) ListWorkflowDefinitions() ([]WorkflowDefinition, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]WorkflowDefinition, 0, len(s.workflowDefinitions))
+	for _, wd := range s.workflowDefinitions {
+		list = append(list, wd)
+	}
+	return list, nil
+}
+
+// UpdateWorkflowDefinition updates an existing workflow definition.
+func (s *Store) UpdateWorkflowDefinition(id string, def WorkflowDefinition) (WorkflowDefinition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existingDef, ok := s.workflowDefinitions[id]
+	if !ok {
+		return WorkflowDefinition{}, fmt.Errorf("workflow definition with ID %s not found", id)
+	}
+
+	if def.Name == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow name cannot be empty")
+	}
+	if def.TriggerType == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_type cannot be empty")
+	}
+	if def.TriggerConfig == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_config cannot be empty")
+	}
+	if def.ActionSequenceJSON == "" {
+		return WorkflowDefinition{}, fmt.Errorf("workflow action_sequence_json cannot be empty")
+	}
+
+	existingDef.Name = def.Name
+	existingDef.Description = def.Description
+	existingDef.TriggerType = def.TriggerType
+	existingDef.TriggerConfig = def.TriggerConfig
+	existingDef.ActionSequenceJSON = def.ActionSequenceJSON
+	existingDef.IsEnabled = def.IsEnabled // Ensure IsEnabled can be updated
+	existingDef.UpdatedAt = time.Now().UTC()
+
+	s.workflowDefinitions[id] = existingDef
+	return existingDef, nil
+}
+
+// DeleteWorkflowDefinition removes a workflow definition from the store.
+func (s *Store) DeleteWorkflowDefinition(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.workflowDefinitions[id]; !ok {
+		return fmt.Errorf("workflow definition with ID %s not found", id)
+	}
+	delete(s.workflowDefinitions, id)
+	return nil
+}
+
+// --- ActionTemplate Methods ---
+
+// CreateActionTemplate adds a new action template to the store.
+func (s *Store) CreateActionTemplate(tmpl ActionTemplate) (ActionTemplate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tmpl.Name == "" {
+		return ActionTemplate{}, fmt.Errorf("action template name cannot be empty")
+	}
+	if tmpl.ActionType == "" {
+		return ActionTemplate{}, fmt.Errorf("action template action_type cannot be empty")
+	}
+	if tmpl.TemplateContent == "" { // Basic validation
+		return ActionTemplate{}, fmt.Errorf("action template template_content cannot be empty")
+	}
+	// Add more validation for TemplateContent (e.g., JSON validity) if needed.
+
+
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	tmpl.ID = id
+	tmpl.CreatedAt = now
+	tmpl.UpdatedAt = now
+
+	s.actionTemplates[id] = tmpl
+	return tmpl, nil
+}
+
+// GetActionTemplate retrieves an action template by its ID.
+func (s *Store) GetActionTemplate(id string) (ActionTemplate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	at, ok := s.actionTemplates[id]
+	if !ok {
+		return ActionTemplate{}, fmt.Errorf("action template with ID %s not found", id)
+	}
+	return at, nil
+}
+
+// ListActionTemplates retrieves all action templates.
+func (s *Store) ListActionTemplates() ([]ActionTemplate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]ActionTemplate, 0, len(s.actionTemplates))
+	for _, at := range s.actionTemplates {
+		list = append(list, at)
+	}
+	return list, nil
+}
+
+// UpdateActionTemplate updates an existing action template.
+func (s *Store) UpdateActionTemplate(id string, tmpl ActionTemplate) (ActionTemplate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existingTmpl, ok := s.actionTemplates[id]
+	if !ok {
+		return ActionTemplate{}, fmt.Errorf("action template with ID %s not found", id)
+	}
+
+	if tmpl.Name == "" {
+		return ActionTemplate{}, fmt.Errorf("action template name cannot be empty")
+	}
+	if tmpl.ActionType == "" {
+		return ActionTemplate{}, fmt.Errorf("action template action_type cannot be empty")
+	}
+	if tmpl.TemplateContent == "" {
+		return ActionTemplate{}, fmt.Errorf("action template template_content cannot be empty")
+	}
+
+	existingTmpl.Name = tmpl.Name
+	existingTmpl.Description = tmpl.Description
+	existingTmpl.ActionType = tmpl.ActionType
+	existingTmpl.TemplateContent = tmpl.TemplateContent
+	existingTmpl.UpdatedAt = time.Now().UTC()
+
+	s.actionTemplates[id] = existingTmpl
+	return existingTmpl, nil
+}
+
+// DeleteActionTemplate removes an action template from the store.
+func (s *Store) DeleteActionTemplate(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.actionTemplates[id]; !ok {
+		return fmt.Errorf("action template with ID %s not found", id)
+	}
+	delete(s.actionTemplates, id)
 	return nil
 }
 

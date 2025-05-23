@@ -11,6 +11,30 @@ type EntityDefinition struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// WorkflowDefinition defines the structure for a workflow.
+type WorkflowDefinition struct {
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	Description         string    `json:"description,omitempty"`
+	TriggerType         string    `json:"trigger_type"` // e.g., "on_group_update", "manual"
+	TriggerConfig       string    `json:"trigger_config"` // e.g., {"group_id": "uuid"} as JSON string
+	ActionSequenceJSON  string    `json:"action_sequence_json"` // JSON string for action sequence
+	IsEnabled           bool      `json:"is_enabled"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// ActionTemplate defines the structure for an action template.
+type ActionTemplate struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Description     string    `json:"description,omitempty"`
+	ActionType      string    `json:"action_type"` // e.g., "webhook", "email"
+	TemplateContent string    `json:"template_content"` // JSON string for template
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
 // AttributeDefinition represents the structure for a metadata attribute.
 type AttributeDefinition struct {
 	ID           string    `json:"id"`
