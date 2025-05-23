@@ -102,6 +102,8 @@ export const deleteFieldMapping = (sourceId, mappingId) => {
   createGroupDefinition: (groupData) => apiClient.post('/groups', groupData),
   updateGroupDefinition: (groupId, groupData) => apiClient.put(`/groups/${groupId}`, groupData),
   deleteGroupDefinition: (groupId) => apiClient.delete(`/groups/${groupId}`),
+  calculateGroup: (groupId) => apiClient.post(`/groups/${groupId}/calculate`),
+  getGroupResults: (groupId) => apiClient.get(`/groups/${groupId}/results`),
 };
 
 

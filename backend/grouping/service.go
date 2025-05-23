@@ -1,151 +1,378 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
-// GroupingService placeholder for business logic
-// This was already defined in main.go, but keeping it separate is good practice.
-// If main.go uses this definition, then the one in main.go can be removed
-// or this file's content can be merged into main.go for a single-file service at this stage.
-// For now, assuming main.go will be updated to use this service.go definition.
+// --- Metadata Service Client ---
 
-// Note: The type GroupingService was already in main.go.
-// If this service.go is used, main.go's internal GroupingService struct should be removed,
-// and it should instantiate *main.GroupingService (if types are in the same package)
-// or *grouping.GroupingService (if this were a separate 'grouping' package).
-// For simplicity with the current single-file structure in main.go, this file might be redundant
-// unless we plan to split main.go further.
-// However, to fulfill the subtask "Create backend/grouping/service.go", I'm creating it.
-// If main.go is already complete with its own GroupingService struct and methods,
-// this file might not be strictly necessary for the placeholder.
-
-// Let's redefine it here as if it's the primary source for the service logic.
-// The main.go would then need to be adjusted to use this.
-
-// This service will later interact with the metadata service (to get group rules)
-// and the processed data store.
-// For now, it just logs.
-
-// CalculateGroup is a placeholder for the actual group calculation logic
-// This method was already defined in the GroupingService struct in main.go
-// If this service.go is used, the main.go handler should call this method.
-func (s *GroupingService) CalculateGroup(groupID string) error {
-	log.Printf("GroupingService (from service.go): CalculateGroup called for groupID: %s. Logic not yet implemented.", groupID)
-	// In the future, this will fetch group rules, query processed data, and store results.
-	return nil // Or return an error like fmt.Errorf("not implemented")
+// MetadataServiceAPIClient defines the interface for an API client to fetch metadata.
+type MetadataServiceAPIClient interface {
+	GetGroupDefinition(groupID string) (*GroupDefinition, error)
+	GetEntityDefinition(entityID string) (*EntityDefinition, error)
+	GetAttributeDefinition(entityID string, attributeID string) (*AttributeDefinition, error)
 }
 
-// Note: NewGroupingService was also in main.go.
-// If main.go is to use this service.go, it should call NewGroupingService() from here.
-// The type definition of GroupingService itself needs to be harmonized
-// (either use this one, or the one in main.go, or make them distinct if that's the design).
-// Given the task, it's implied this file should define the service structure.
-// The main.go should then use this structure.
-// Let's assume main.go's GroupingService struct and its methods will be replaced by usage of this.
-// So, the struct definition for GroupingService should ideally be here.
-
-/*
-// This is how it would look if GroupingService struct was defined here:
-package grouping // Assuming a separate package
-
-import (
-	"log"
-)
-
-type GroupingService struct {
-	// Dependencies like metadata client or DB connection will be added later
+// HTTPMetadataClient is an implementation of MetadataServiceAPIClient using HTTP.
+type HTTPMetadataClient struct {
+	BaseURL    string
+	HttpClient *http.Client
 }
 
-func NewGroupingService() *GroupingService {
-	return &GroupingService{}
+// NewHTTPMetadataClient creates a new client for the metadata service.
+func NewHTTPMetadataClient(baseURL string) *HTTPMetadataClient {
+	return &HTTPMetadataClient{
+		BaseURL:    baseURL,
+		HttpClient: &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
-func (s *GroupingService) CalculateGroup(groupID string) error {
-	log.Printf("GroupingService: CalculateGroup called for groupID: %s. Logic not yet implemented.", groupID)
+func (c *HTTPMetadataClient) fetchMetadata(url string, target interface{}) error {
+	resp, err := c.HttpClient.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// TODO: Read body for more detailed error from metadata service
+		return fmt.Errorf("metadata service returned non-OK status %d for %s", resp.StatusCode, url)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("failed to decode response from %s: %w", url, err)
+	}
 	return nil
 }
 
-*/
+// GetGroupDefinition fetches a GroupDefinition from the metadata service.
+func (c *HTTPMetadataClient) GetGroupDefinition(groupID string) (*GroupDefinition, error) {
+	var groupDef GroupDefinition
+	url := fmt.Sprintf("%s/api/v1/groups/%s", c.BaseURL, groupID)
+	err := c.fetchMetadata(url, &groupDef)
+	if err != nil {
+		return nil, err
+	}
+	return &groupDef, nil
+}
 
-// Since main.go already has a working GroupingService struct and methods within package main,
-// and to avoid compilation errors if both files define `main.GroupingService`,
-// I will leave this file as mostly comments explaining the structure.
-// The core logic is already present in the `main.go` created in the previous step as per instructions.
-// If the intention was to *move* the service struct and methods here, main.go would need to be adjusted.
-// For now, the instruction "The calculateGroupHandler in main.go would then call this service method."
-// implies that the service methods should be distinct.
+// GetEntityDefinition fetches an EntityDefinition from the metadata service.
+func (c *HTTPMetadataClient) GetEntityDefinition(entityID string) (*EntityDefinition, error) {
+	var entityDef EntityDefinition
+	url := fmt.Sprintf("%s/api/v1/entities/%s", c.BaseURL, entityID)
+	err := c.fetchMetadata(url, &entityDef)
+	if err != nil {
+		return nil, err
+	}
+	return &entityDef, nil
+}
 
-// To make this file useful and distinct, let's assume the service in main.go is the HTTP handler layer,
-// and this service.go contains the core business logic service.
-// The handler in main.go would then call methods from this service.
-// This means the GroupingService struct in main.go should be the one defined here.
-// I will proceed by creating the struct and its methods here,
-// and the next step would be to adjust main.go to use this.
+// GetAttributeDefinition fetches an AttributeDefinition from the metadata service.
+func (c *HTTPMetadataClient) GetAttributeDefinition(entityID string, attributeID string) (*AttributeDefinition, error) {
+	var attrDef AttributeDefinition
+	// Corrected URL assuming attributes are nested under entities
+	url := fmt.Sprintf("%s/api/v1/entities/%s/attributes/%s", c.BaseURL, entityID, attributeID)
+	err := c.fetchMetadata(url, &attrDef)
+	if err != nil {
+		return nil, err
+	}
+	return &attrDef, nil
+}
 
-// ---
-// Content of service.go as intended to be used by main.go:
-// package main // or `package grouping` if it were a separate package
-// (continuing in package main for simplicity with current main.go)
+// --- Grouping Service ---
 
-// Dependencies like metadata client or DB connection will be added later.
-// func NewGroupingService() and func (s *GroupingService) CalculateGroup
-// are already correctly defined in the main.go from the previous step.
-// This file, as a separate service.go, would typically house that exact struct and methods.
-// To avoid re-declaration error within the same package `main`,
-// I will not repeat the struct and method definitions here.
-// The existing main.go fulfills the "service.go" structural role for this placeholder.
+// GroupingService handles the logic for calculating groups.
+type GroupingService struct {
+	metadataClient MetadataServiceAPIClient
+	db             *sql.DB
+}
 
-// If the task requires this file to have *different* content or a *refactoring*
-// of main.go into this file, that would be a subsequent step.
-// For now, the placeholder GroupingService is self-contained in main.go.
+// NewGroupingService creates a new GroupingService.
+func NewGroupingService(client MetadataServiceAPIClient, db *sql.DB) *GroupingService {
+	return &GroupingService{
+		metadataClient: client,
+		db:             db,
+	}
+}
 
-// If the task implies that `main.go` should NOT have the service struct and methods,
-// then they should be defined here, and `main.go` should only have handlers and route setup
-// calling the service defined in this `service.go`.
-// Let's assume that's the desired structure.
+// CalculateGroup fetches group rules, queries processed data, and returns matching entity instance IDs.
+func (s *GroupingService) CalculateGroup(groupID string) ([]string, error) {
+	log.Printf("Calculating group for groupID: %s", groupID)
 
-// This content is what `service.go` should contain.
-// The `main.go` would then need to be updated to use this.
-// However, since `main.go` was created in the prior step with this logic already,
-// I will keep this file minimal to avoid conflict or redundancy *within the same turn*.
-// The instructions are sequential, and `main.go` already has the service logic.
-// The next step would be to refactor `main.go` if needed.
+	// 1. Fetch GroupDefinition
+	groupDef, err := s.metadataClient.GetGroupDefinition(groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group definition for ID %s: %w", groupID, err)
+	}
+	log.Printf("Fetched GroupDefinition: %s (EntityID: %s)", groupDef.Name, groupDef.EntityID)
 
-// For the purpose of this step, creating a file named service.go:
-// (empty for now to avoid conflict, as logic is in main.go)
-// Actual service logic is currently in main.go as per previous step.
-// This file is created to satisfy the "Create backend/grouping/service.go" requirement.
-// The content for this file is essentially what was put into main.go's GroupingService.
-log.Println("backend/grouping/service.go created. Service logic is currently in main.go as per prior step.")
-// This is a bit of a catch-22. If I put the service code here, main.go from previous step is "wrong".
-// If I don't, this step is "empty".
-// I will assume the task wants the *files created*, and the content can be reconciled.
-// The main.go created in the prior step already includes the service struct and methods.
-// So, this file is a placeholder for now.
-// The "optional for this placeholder step" makes this step's content less critical if main.go is functional.
-// The key parts are go.mod, main.go handler, and Dockerfile.
-// I will add the struct definition here as requested.
-// It is identical to what's in main.go. This will cause a conflict if not handled.
-// The expectation is likely that main.go would *not* define it if service.go does.
+	// 2. Fetch EntityDefinition
+	entityDef, err := s.metadataClient.GetEntityDefinition(groupDef.EntityID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get entity definition for ID %s: %w", groupDef.EntityID, err)
+	}
+	entityTypeName := entityDef.Name
+	log.Printf("Fetched EntityDefinition: %s (Type Name: %s)", entityDef.Name, entityTypeName)
 
-// --- Re-defining service here, assuming main.go will be updated or this is the canonical definition ---
-// package main // Still in package main as per current structure
+	// 3. Parse RulesJSON
+	var ruleSet RuleSet
+	if err := json.Unmarshal([]byte(groupDef.RulesJSON), &ruleSet); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal rules JSON for group %s: %w", groupID, err)
+	}
+	if len(ruleSet.Conditions) == 0 {
+		log.Printf("No conditions found in rules for group %s. Returning empty result.", groupID)
+		return []string{}, nil
+	}
+	log.Printf("Parsed %d rule conditions for group %s. Logical Operator: %s", len(ruleSet.Conditions), groupID, ruleSet.LogicalOperator)
 
-// (GroupingService struct and its methods NewGroupingService, CalculateGroup
-//  are already defined in main.go. If they are to be defined here,
-//  they must be removed from main.go to avoid re-declaration errors.
-//  For this step, I will assume they are defined here and main.go will be adapted later if needed,
-//  or this file is just for "good structure" and main.go's version is primary for the placeholder.)
 
-// To avoid issues, and since main.go is already functional with these,
-// I will leave this file minimal for now. The "optional" nature of this step for the placeholder
-// means the core functionality in main.go is sufficient.
+	// 4. Fetch AttributeDefinitions for all unique attribute IDs in conditions
+	attributeDefinitions := make(map[string]*AttributeDefinition) // Map AttributeID to its definition
+	for _, cond := range ruleSet.Conditions {
+		if _, exists := attributeDefinitions[cond.AttributeID]; !exists {
+			// Note: The frontend's GroupRuleBuilder uses attribute ID directly.
+			// The backend metadata API for attributes is /entities/{entity_id}/attributes/{attribute_id}
+			attrDef, err := s.metadataClient.GetAttributeDefinition(groupDef.EntityID, cond.AttributeID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get attribute definition for ID %s (Entity %s): %w", cond.AttributeID, groupDef.EntityID, err)
+			}
+			attributeDefinitions[cond.AttributeID] = attrDef
+			log.Printf("Fetched AttributeDefinition: %s (ID: %s, Type: %s)", attrDef.Name, attrDef.ID, attrDef.DataType)
+		}
+	}
+	
+	// 5. Construct SQL Query
+	var queryBuilder strings.Builder
+	var queryParams []interface{}
+	paramCounter := 1 // For $1, $2, etc.
 
-// If a distinct service.go is strictly required with the definitions,
-// then main.go from the previous step needs adjustment.
-// Let's assume the task means "ensure these components exist".
-// The prior main.go fulfills the service component for the placeholder.
-// This file is created to satisfy the step.
-// No actual Go code will be in this file for now to prevent compilation errors with the existing main.go.
-// The service logic is self-contained in main.go for the placeholder.
+	queryBuilder.WriteString(fmt.Sprintf("SELECT id FROM processed_entities WHERE entity_type_name = $%d", paramCounter))
+	queryParams = append(queryParams, entityTypeName)
+	paramCounter++
+
+	// Assuming "AND" logical operator for now as per instructions
+	if strings.ToUpper(ruleSet.LogicalOperator) != "AND" && ruleSet.LogicalOperator != "" {
+		log.Printf("Warning: Unsupported logical operator '%s' for group %s. Defaulting to AND.", ruleSet.LogicalOperator, groupID)
+		// For now, all conditions are ANDed. Future work could handle OR.
+	}
+
+	for _, cond := range ruleSet.Conditions {
+		attrDef, ok := attributeDefinitions[cond.AttributeID]
+		if !ok {
+			return nil, fmt.Errorf("internal error: attribute definition for ID %s not found in fetched map", cond.AttributeID)
+		}
+		attributeName := attrDef.Name // Use the actual name from metadata for JSONB key
+
+		// Start building the condition string
+		queryBuilder.WriteString(" AND ")
+
+		// Handle JSONB access and type casting
+		fieldAccessor := fmt.Sprintf("data->>'%s'", attributeName)
+		castType := ""
+		switch strings.ToLower(attrDef.DataType) {
+		case "integer", "long": // Assuming 'long' might be a custom type mapping to integer-like
+			castType = "::bigint" // Or ::integer, depending on expected range
+		case "float", "double", "decimal": // Assuming these map to numeric types
+			castType = "::numeric" // Or ::float, ::double precision
+		case "boolean":
+			castType = "::boolean"
+		case "datetime", "date", "timestamp":
+			castType = "::timestamp" // Or ::date, depending on required precision and comparison
+		// String types (string, text, char, varchar, etc.) usually don't need explicit cast for text operators
+		}
+
+		// Build condition based on operator
+		switch strings.ToLower(cond.Operator) {
+		case "equals":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) = $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "not_equals":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) != $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "greater_than":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) > $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "less_than":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) < $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "greater_than_or_equal_to": // Corrected from greater_than_or_equals
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) >= $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "less_than_or_equal_to": // Corrected from less_than_or_equals
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) <= $%d", fieldAccessor, castType, paramCounter))
+			queryParams = append(queryParams, cond.Value)
+			paramCounter++
+		case "contains":
+			if castType != "" && castType != "::boolean" { // Contains is typically for text, don't cast non-text
+				queryBuilder.WriteString(fmt.Sprintf("%s LIKE $%d", fieldAccessor, paramCounter))
+			} else {
+				queryBuilder.WriteString(fmt.Sprintf("%s LIKE $%d", fieldAccessor, paramCounter))
+			}
+			queryParams = append(queryParams, fmt.Sprintf("%%%v%%", cond.Value)) // Add wildcards
+			paramCounter++
+		case "does_not_contain":
+			if castType != "" && castType != "::boolean" {
+				queryBuilder.WriteString(fmt.Sprintf("%s NOT LIKE $%d", fieldAccessor, paramCounter))
+			} else {
+				queryBuilder.WriteString(fmt.Sprintf("%s NOT LIKE $%d", fieldAccessor, paramCounter))
+			}
+			queryParams = append(queryParams, fmt.Sprintf("%%%v%%", cond.Value))
+			paramCounter++
+		case "is_true":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) IS TRUE", fieldAccessor, castType))
+			// No parameter needed
+		case "is_false":
+			queryBuilder.WriteString(fmt.Sprintf("(%s%s) IS FALSE", fieldAccessor, castType))
+			// No parameter needed
+		case "is_null":
+			// For JSONB, checking for null is (data->'key') IS NULL, not data->>'key' IS NULL
+			// because data->>'key' converts JSON null to SQL NULL, which behaves as expected with IS NULL.
+			// However, if a key is entirely missing, data->>'key' also results in SQL NULL.
+			// This behavior is usually fine for "is_null".
+			queryBuilder.WriteString(fmt.Sprintf("%s IS NULL", fieldAccessor))
+			// No parameter needed
+		case "is_not_null":
+			queryBuilder.WriteString(fmt.Sprintf("%s IS NOT NULL", fieldAccessor))
+			// No parameter needed
+		default:
+			return nil, fmt.Errorf("unsupported operator '%s' for attribute %s", cond.Operator, attributeName)
+		}
+	}
+
+	finalQuery := queryBuilder.String()
+	log.Printf("Constructed SQL query for group %s: %s", groupID, finalQuery)
+	log.Printf("Query parameters: %v", queryParams)
+
+	// 6. Execute Query
+	rows, err := s.db.Query(finalQuery, queryParams...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query for group %s: %w. Query: %s, Params: %v", groupID, err, finalQuery, queryParams)
+	}
+	defer rows.Close()
+
+	var entityInstanceIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan row for group %s: %w", groupID, err)
+		}
+		entityInstanceIDs = append(entityInstanceIDs, id)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows for group %s: %w", groupID, err)
+	}
+
+	log.Printf("Found %d entity instances for group %s", len(entityInstanceIDs), groupID)
+
+	// Store the results
+	err = s.StoreGroupResults(groupID, entityInstanceIDs)
+	if err != nil {
+		// Log the error, but still return the IDs found by CalculateGroup.
+		// Depending on requirements, this could be a critical error.
+		log.Printf("Error storing group calculation results for group %s: %v", groupID, err)
+		return entityInstanceIDs, fmt.Errorf("failed to store group results after calculation: %w", err)
+	}
+
+	return entityInstanceIDs, nil
+}
+
+// StoreGroupResults saves the calculated instance IDs for a group.
+// It first clears any existing results for the group and then inserts the new ones.
+func (s *GroupingService) StoreGroupResults(groupID string, instanceIDs []string) error {
+	log.Printf("Storing %d results for groupID: %s", len(instanceIDs), groupID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for storing group results: %w", err)
+	}
+	defer tx.Rollback() // Rollback if not committed
+
+	// 1. Delete existing results for this group
+	_, err = tx.Exec("DELETE FROM group_results WHERE group_id = $1", groupID)
+	if err != nil {
+		return fmt.Errorf("failed to delete existing group results for group %s: %w", groupID, err)
+	}
+	log.Printf("Deleted existing results for groupID: %s", groupID)
+
+	// 2. Insert new results
+	if len(instanceIDs) > 0 {
+		stmt, err := tx.Prepare("INSERT INTO group_results (group_id, entity_instance_id, calculated_at) VALUES ($1, $2, $3)")
+		if err != nil {
+			return fmt.Errorf("failed to prepare insert statement for group results: %w", err)
+		}
+		defer stmt.Close()
+
+		calculatedAt := time.Now().UTC() // Use one timestamp for the whole batch
+
+		for _, instanceID := range instanceIDs {
+			_, err := stmt.Exec(groupID, instanceID, calculatedAt)
+			if err != nil {
+				// If one insert fails, the transaction will be rolled back.
+				return fmt.Errorf("failed to insert group result (groupID: %s, instanceID: %s): %w", groupID, instanceID, err)
+			}
+		}
+		log.Printf("Inserted %d new results for groupID: %s", len(instanceIDs), groupID)
+	} else {
+		log.Printf("No instance IDs provided for groupID: %s. No new results to insert.", groupID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction for storing group results: %w", err)
+	}
+
+	log.Printf("Successfully stored results for groupID: %s", groupID)
+	return nil
+}
+
+// GetGroupResults retrieves the stored instance IDs and calculation timestamp for a group.
+func (s *GroupingService) GetGroupResults(groupID string) ([]string, time.Time, error) {
+	log.Printf("Fetching results for groupID: %s", groupID)
+
+	rows, err := s.db.Query("SELECT entity_instance_id, calculated_at FROM group_results WHERE group_id = $1 ORDER BY calculated_at DESC", groupID)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("failed to query group_results for group %s: %w", groupID, err)
+	}
+	defer rows.Close()
+
+	var instanceIDs []string
+	var calculatedAt time.Time
+	var firstRow = true
+
+	for rows.Next() {
+		var instanceID string
+		var currentCalculatedAt time.Time
+		if err := rows.Scan(&instanceID, &currentCalculatedAt); err != nil {
+			return nil, time.Time{}, fmt.Errorf("failed to scan row from group_results for group %s: %w", groupID, err)
+		}
+		instanceIDs = append(instanceIDs, instanceID)
+		if firstRow {
+			calculatedAt = currentCalculatedAt // Capture the timestamp from the first row
+			firstRow = false
+		}
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, time.Time{}, fmt.Errorf("error iterating rows from group_results for group %s: %w", groupID, err)
+	}
+
+	if len(instanceIDs) == 0 {
+		log.Printf("No results found in group_results for groupID: %s", groupID)
+		// Return zero time and empty slice, not an error, to distinguish "not found" from query failure
+		return []string{}, time.Time{}, nil
+	}
+
+	log.Printf("Retrieved %d results for groupID: %s, calculated around %s", len(instanceIDs), groupID, calculatedAt.Format(time.RFC3339))
+	return instanceIDs, calculatedAt, nil
+}

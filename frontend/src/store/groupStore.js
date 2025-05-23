@@ -11,8 +11,20 @@ export const useGroupStore = defineStore('group', {
   state: () => ({
     groups: [],
     currentGroup: null,
-    loading: false,
-    error: null,
+    loading: false, // For general group list/detail fetching
+    error: null,    // For general group list/detail errors
+    currentGroupResults: { 
+      member_ids: [], 
+      calculated_at: null, 
+      member_count: 0, 
+      isLoading: false, 
+      error: null 
+    },
+    calculationStatus: { 
+      isLoading: false, 
+      error: null, 
+      message: '' 
+    },
   }),
   actions: {
     async fetchGroupDefinitions() {
@@ -100,7 +112,53 @@ export const useGroupStore = defineStore('group', {
     },
     clearCurrentGroup() {
       this.currentGroup = null;
-      this.error = null;
+      this.error = null; // General error
+      // Reset results and calculation status when current group is cleared
+      this.currentGroupResults = { member_ids: [], calculated_at: null, member_count: 0, isLoading: false, error: null };
+      this.calculationStatus = { isLoading: false, error: null, message: '' };
+    },
+    async triggerGroupCalculation(groupId) {
+      this.calculationStatus.isLoading = true;
+      this.calculationStatus.error = null;
+      this.calculationStatus.message = '';
+      try {
+        const response = await calculateGroup(groupId); // from apiService
+        this.calculationStatus.message = response.data?.message || 'Group calculation triggered successfully. Results are being processed.';
+        // Optionally, immediately fetch results or update group info if response contains it
+        // For now, we'll let the user click "View Results"
+        // await this.fetchGroupResults(groupId); // Or, if the calculation is synchronous for results
+        if (response.data && response.data.calculated_at && this.currentGroup && this.currentGroup.id === groupId) {
+           // If the calculate endpoint immediately returns results or a new calculation time
+           this.currentGroupResults.calculated_at = response.data.calculated_at;
+           this.currentGroupResults.member_count = response.data.member_count || 0;
+           // If it returns member_ids directly:
+           // this.currentGroupResults.member_ids = response.data.member_ids || [];
+        }
+      } catch (error) {
+        this.calculationStatus.error = error.response?.data?.error || error.message || 'Failed to trigger group calculation';
+        console.error(`Error triggering calculation for group ${groupId}:`, error);
+      } finally {
+        this.calculationStatus.isLoading = false;
+      }
+    },
+    async fetchGroupResults(groupId) {
+      this.currentGroupResults.isLoading = true;
+      this.currentGroupResults.error = null;
+      try {
+        const response = await getGroupResults(groupId); // from apiService
+        this.currentGroupResults.member_ids = response.data?.member_ids || [];
+        this.currentGroupResults.calculated_at = response.data?.calculated_at || null;
+        this.currentGroupResults.member_count = response.data?.member_count || 0;
+      } catch (error) {
+        this.currentGroupResults.error = error.response?.data?.error || error.message || 'Failed to fetch group results';
+        // Clear data on error
+        this.currentGroupResults.member_ids = [];
+        this.currentGroupResults.calculated_at = null;
+        this.currentGroupResults.member_count = 0;
+        console.error(`Error fetching results for group ${groupId}:`, error);
+      } finally {
+        this.currentGroupResults.isLoading = false;
+      }
     },
   },
 });

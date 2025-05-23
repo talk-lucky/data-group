@@ -11,61 +11,124 @@
       Error fetching group definition: {{ groupStore.error }}
     </v-alert>
 
-    <v-card v-if="group && !groupStore.loading" class="mb-5">
+    <v-card v-if="groupDetails && !groupStore.loading" class="mb-5">
       <v-card-title class="text-h4 d-flex justify-space-between align-center">
-        <span>Group: {{ group.name }}</span>
+        <span>Group: {{ groupDetails.name }}</span>
          <v-chip v-if="entityName" color="primary" class="ml-2">{{ entityName }}</v-chip>
       </v-card-title>
       <v-card-subtitle class="pb-2">
-        ID: {{ group.id }}
+        ID: {{ groupDetails.id }}
       </v-card-subtitle>
       <v-divider></v-divider>
       <v-card-text>
         <v-list dense>
           <v-list-item>
             <v-list-item-title><strong>Description:</strong></v-list-item-title>
-            <v-list-item-subtitle>{{ group.description || 'N/A' }}</v-list-item-subtitle>
+            <v-list-item-subtitle>{{ groupDetails.description || 'N/A' }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item v-if="entityName">
             <v-list-item-title><strong>Associated Entity:</strong></v-list-item-title>
             <v-list-item-subtitle>
-              <router-link :to="`/entities/${group.entity_id}`" class="text-decoration-none">
-                {{ entityName }} (ID: {{ group.entity_id }})
+              <router-link :to="`/entities/${groupDetails.entity_id}`" class="text-decoration-none">
+                {{ entityName }} (ID: {{ groupDetails.entity_id }})
                 <v-icon small class="ml-1">mdi-link-variant</v-icon>
               </router-link>
             </v-list-item-subtitle>
           </v-list-item>
            <v-list-item>
             <v-list-item-title><strong>Created At:</strong></v-list-item-title>
-            <v-list-item-subtitle>{{ formatDate(group.created_at) }}</v-list-item-subtitle>
+            <v-list-item-subtitle>{{ formatDate(groupDetails.created_at) }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item>
             <v-list-item-title><strong>Last Updated At:</strong></v-list-item-title>
-            <v-list-item-subtitle>{{ formatDate(group.updated_at) }}</v-list-item-subtitle>
+            <v-list-item-subtitle>{{ formatDate(groupDetails.updated_at) }}</v-list-item-subtitle>
           </v-list-item>
         </v-list>
 
         <v-divider class="my-4"></v-divider>
         
         <h3 class="text-h6 mb-2">Grouping Rules:</h3>
-        <div v-if="group.rules_json && group.rules_json !== '{}' && group.rules_json !== '[]'">
+        <div v-if="groupDetails.rules_json && groupDetails.rules_json !== '{}' && groupDetails.rules_json !== '[]'">
             <GroupRuleBuilder 
-                :model-value="group.rules_json" 
-                :entity-id="group.entity_id" 
+                :model-value="groupDetails.rules_json" 
+                :entity-id="groupDetails.entity_id" 
                 read-only 
                 class="mb-3" 
             />
-            <!-- Fallback for simple JSON display if needed, or for debugging -->
-            <!-- 
-            <v-sheet elevation="1" rounded class="pa-3 mt-1" style="background-color: #f5f5f5;">
-              <pre style="white-space: pre-wrap; word-break: break-all;">{{ formattedRulesJson }}</pre>
-            </v-sheet>
-            -->
         </div>
-        <v-alert v-else type="info" variant="tonal">
+        <v-alert v-else type="info" variant="tonal" class="mb-3">
             No specific rules defined for this group, or rules are empty.
         </v-alert>
 
+        <v-divider class="my-4"></v-divider>
+
+        <!-- Calculate Group Section -->
+        <h3 class="text-h6 mb-2">Calculate Group Membership</h3>
+        <v-btn 
+          color="info" 
+          @click="triggerCalculation" 
+          :loading="isCalculating" 
+          :disabled="isCalculating"
+          class="mr-3"
+        >
+          <v-icon left>mdi-calculator</v-icon>
+          {{ groupResults && groupResults.calculated_at ? 'Recalculate Group' : 'Calculate Group Now' }}
+        </v-btn>
+         <v-alert v-if="calculationStatus.message && !calculationStatus.error" type="info" dense class="mt-3 mb-2" closable>
+          {{ calculationStatus.message }}
+        </v-alert>
+        <v-alert v-if="calculationStatus.error" type="error" dense class="mt-3 mb-2" closable>
+          Calculation Error: {{ calculationStatus.error }}
+        </v-alert>
+        
+        <v-divider class="my-4"></v-divider>
+
+        <!-- Results Section -->
+        <h3 class="text-h6 mb-2">Group Results</h3>
+        <v-btn 
+            color="success" 
+            @click="refreshResults" 
+            :loading="resultsLoading"
+            :disabled="resultsLoading"
+            class="mb-3"
+        >
+          <v-icon left>mdi-refresh</v-icon>
+          View/Refresh Results
+        </v-btn>
+
+        <v-progress-linear v-if="resultsLoading" indeterminate color="secondary" class="my-2"></v-progress-linear>
+        
+        <v-alert v-if="groupResults.error" type="error" dense class="mb-3" closable>
+          Error fetching results: {{ groupResults.error }}
+        </v-alert>
+
+        <div v-if="!resultsLoading && !groupResults.error">
+          <p v-if="groupResults.calculated_at">
+            <strong>Last Calculated At:</strong> {{ formatDate(groupResults.calculated_at) }}
+          </p>
+          <p v-else class="text-grey">No calculation results available yet. Click "Calculate" or "Refresh".</p>
+          
+          <p><strong>Member Count:</strong> {{ groupResults.member_count || 0 }}</p>
+
+          <div v-if="groupResults.member_ids && groupResults.member_ids.length > 0" class="mt-3">
+            <h4 class="text-subtitle-1">Member IDs (Sample - first {{ displayLimit }} shown):</h4>
+            <v-list dense lines="one" class="pa-0">
+              <v-list-item 
+                v-for="(id, index) in limitedMemberIds" 
+                :key="index"
+                class="pl-0"
+              >
+                <v-list-item-title>{{ id }}</v-list-item-title>
+              </v-list-item>
+            </v-list>
+            <p v-if="groupResults.member_ids.length > displayLimit" class="text-caption text-grey">
+              ...and {{ groupResults.member_ids.length - displayLimit }} more.
+            </p>
+          </div>
+           <p v-else-if="groupResults.calculated_at && groupResults.member_count === 0" class="text-grey mt-2">
+            This group has no members based on the last calculation.
+          </p>
+        </div>
       </v-card-text>
        <v-card-actions>
         <v-spacer></v-spacer>
@@ -76,7 +139,7 @@
       </v-card-actions>
     </v-card>
 
-    <div v-if="!group && !groupStore.loading && !groupStore.error" class="text-center my-5">
+    <div v-if="!groupDetails && !groupStore.loading && !groupStore.error" class="text-center my-5">
       <v-alert type="warning">
         Group with ID "{{ groupId }}" not found.
       </v-alert>
@@ -96,37 +159,49 @@ const groupStore = useGroupStore();
 const entityStore = useEntityStore();
 
 const groupId = computed(() => route.params.id);
-const group = computed(() => groupStore.currentGroup);
+const groupDetails = computed(() => groupStore.currentGroup); // Renamed for clarity
+const groupResults = computed(() => groupStore.currentGroupResults);
+const calculationStatus = computed(() => groupStore.calculationStatus);
+const isCalculating = computed(() => groupStore.calculationStatus.isLoading);
+const resultsLoading = computed(() => groupStore.currentGroupResults.isLoading);
+
+const displayLimit = 50; // Max number of member IDs to display
 
 const entityName = computed(() => {
-  if (group.value?.entity_id && entityStore.entities.length > 0) {
-    const entity = entityStore.entities.find(e => e.id === group.value.entity_id);
+  if (groupDetails.value?.entity_id && entityStore.entities.length > 0) {
+    const entity = entityStore.entities.find(e => e.id === groupDetails.value.entity_id);
     return entity ? entity.name : 'Unknown Entity';
   }
   return 'Loading Entity...';
 });
 
-const formattedRulesJson = computed(() => {
-  if (group.value?.rules_json) {
-    try {
-      const parsed = JSON.parse(group.value.rules_json);
-      return JSON.stringify(parsed, null, 2); // Pretty print
-    } catch (e) {
-      return group.value.rules_json; // Return as is if not valid JSON
-    }
-  }
-  return 'No rules defined.';
+const limitedMemberIds = computed(() => {
+  return groupResults.value?.member_ids?.slice(0, displayLimit) || [];
 });
+
 
 onMounted(async () => {
   if (groupId.value) {
     await groupStore.fetchGroupDefinitionById(groupId.value);
-    // If entity_id exists on the fetched group, and entities are not loaded, fetch them
-    if (group.value?.entity_id && entityStore.entities.length === 0) {
+    if (groupDetails.value?.entity_id && entityStore.entities.length === 0) {
       await entityStore.fetchEntities();
     }
+    // Also fetch initial results
+    await groupStore.fetchGroupResults(groupId.value);
   }
 });
+
+function triggerCalculation() {
+  if (groupId.value) {
+    groupStore.triggerGroupCalculation(groupId.value);
+  }
+}
+
+function refreshResults() {
+  if (groupId.value) {
+    groupStore.fetchGroupResults(groupId.value);
+  }
+}
 
 onBeforeUnmount(() => {
   groupStore.clearCurrentGroup();
