@@ -1,10 +1,11 @@
-module example.com/project/ingestion
+module example.com/project/processing
 
 go 1.22.2
 
 require (
 	github.com/gin-gonic/gin v1.10.1
-	github.com/lib/pq v1.10.9 // Added for PostgreSQL driver
+	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.10.9
 )
 
 require (

@@ -30,6 +30,12 @@
           </v-col>
           <v-col cols="12" md="6">
             <v-list dense>
+              <v-list-item v-if="dataSource.entity_id">
+                <v-list-item-title><strong>Associated Entity ID:</strong></v-list-item-title>
+                <v-list-item-subtitle>
+                  <router-link :to="`/entities/${dataSource.entity_id}`">{{ dataSource.entity_id }}</router-link>
+                </v-list-item-subtitle>
+              </v-list-item>
               <v-list-item>
                 <v-list-item-title><strong>Created At:</strong></v-list-item-title>
                 <v-list-item-subtitle>{{ formatDate(dataSource.created_at) }}</v-list-item-subtitle>

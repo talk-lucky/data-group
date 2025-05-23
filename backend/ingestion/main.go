@@ -20,6 +20,30 @@ func main() {
 		}
 	}
 
+	// Initialize Metadata Service Client
+	// The metadata service is assumed to be running at http://localhost:8080
+	// This URL should ideally come from configuration.
+	metadataClient := NewHTTPMetadataClient("http://localhost:8080")
+
+	// Initialize Processing Service Client
+	// The processing service is assumed to be running at http://localhost:8082
+	// This URL should ideally come from configuration.
+	processingClient := NewHTTPProcessingServiceClient("http://localhost:8082")
+
+	// Initialize IngestionService with both clients
+	ingestionSvc := NewIngestionService(metadataClient, processingClient)
+
+	// Define API v1 group (ensure this is not re-declaring 'v1' if it was declared before for router setup)
+	// If router was already configured with v1, this might need adjustment or this is the primary setup.
+	// Assuming 'v1' is freshly declared here for these routes.
+	apiV1 := router.Group("/api/v1") // Use a different name to avoid conflict if v1 already exists
+	{
+		ingestRoutes := apiV1.Group("/ingest")
+		{
+			ingestRoutes.POST("/trigger/:source_id", triggerIngestionHandler(ingestionSvc))
+		}
+	}
+
 	// Start the server on port 8081
 	port := ":8081"
 	log.Printf("Starting Data Ingestion Service on port %s", port)
@@ -28,17 +52,36 @@ func main() {
 	}
 }
 
-// triggerIngestionHandler is a placeholder for the actual ingestion logic.
-func triggerIngestionHandler(c *gin.Context) {
-	sourceID := c.Param("source_id")
+// triggerIngestionHandler creates a gin.HandlerFunc that uses the IngestionService.
+func triggerIngestionHandler(service *IngestionService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		sourceID := c.Param("source_id")
+		log.Printf("Received trigger for data source ID: %s", sourceID)
 
-	log.Printf("Received trigger for data source ID: %s", sourceID)
+		data, err := service.IngestData(sourceID)
+		if err != nil {
+			log.Printf("Error ingesting data for source ID %s: %v", sourceID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message":   "Failed to ingest data",
+				"source_id": sourceID,
+				"error":     err.Error(),
+			})
+			return
+		}
 
-	// Respond with 501 Not Implemented, as the actual ingestion logic is not yet in place.
-	// Or use 202 Accepted if you prefer to indicate the request is accepted but not processed yet.
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"message":   "Ingestion triggered for source_id",
-		"source_id": sourceID,
-		"status":    "not_implemented_yet",
-	})
+		log.Printf("Successfully ingested %d records for source ID: %s", len(data), sourceID)
+		if len(data) > 0 {
+			// Log a sample of the data (e.g., the first record)
+			// Be cautious with logging sensitive data in production.
+			log.Printf("Sample of ingested data for source ID %s (first record): %+v", sourceID, data[0])
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":        "Data ingested successfully",
+			"source_id":      sourceID,
+			"records_ingested": len(data),
+			// Do not return the actual data in the API response.
+			// It will be passed to the processing service in the next step.
+		})
+	}
 }

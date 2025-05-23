@@ -12,18 +12,20 @@ import (
 type Store struct {
 	entities      map[string]EntityDefinition
 	attributes    map[string]map[string]AttributeDefinition // Key: EntityID, Key: AttributeID
-	dataSources   map[string]DataSourceConfig
-	fieldMappings map[string]map[string]DataSourceFieldMapping // Key: SourceID, Key: MappingID
-	mu            sync.RWMutex
+	dataSources      map[string]DataSourceConfig
+	fieldMappings    map[string]map[string]DataSourceFieldMapping // Key: SourceID, Key: MappingID
+	groupDefinitions map[string]GroupDefinition                   // Key: GroupDefinitionID
+	mu               sync.RWMutex
 }
 
 // NewStore creates and returns a new Store.
 func NewStore() *Store {
 	return &Store{
-		entities:      make(map[string]EntityDefinition),
-		attributes:    make(map[string]map[string]AttributeDefinition),
-		dataSources:   make(map[string]DataSourceConfig),
-		fieldMappings: make(map[string]map[string]DataSourceFieldMapping),
+		entities:         make(map[string]EntityDefinition),
+		attributes:       make(map[string]map[string]AttributeDefinition),
+		dataSources:      make(map[string]DataSourceConfig),
+		fieldMappings:    make(map[string]map[string]DataSourceFieldMapping),
+		groupDefinitions: make(map[string]GroupDefinition),
 	}
 }
 
@@ -131,10 +133,104 @@ func (s *Store) DeleteEntity(id string) error {
 	return nil
 }
 
+// --- GroupDefinition Methods ---
+
+// CreateGroupDefinition adds a new group definition to the store.
+func (s *Store) CreateGroupDefinition(def GroupDefinition) (GroupDefinition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if def.Name == "" {
+		return GroupDefinition{}, fmt.Errorf("group definition name cannot be empty")
+	}
+	if def.EntityID == "" {
+		return GroupDefinition{}, fmt.Errorf("group definition entity_id cannot be empty")
+	}
+	if _, ok := s.entities[def.EntityID]; !ok {
+		return GroupDefinition{}, fmt.Errorf("entity with ID %s not found", def.EntityID)
+	}
+	if def.RulesJSON == "" { // Basic check for non-empty rules
+		return GroupDefinition{}, fmt.Errorf("group definition rules_json cannot be empty")
+	}
+	// A more sophisticated JSON validation could be added here if needed.
+
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	def.ID = id
+	def.CreatedAt = now
+	def.UpdatedAt = now
+
+	s.groupDefinitions[id] = def
+	return def, nil
+}
+
+// GetGroupDefinition retrieves a group definition by its ID.
+func (s *Store) GetGroupDefinition(id string) (GroupDefinition, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	groupDef, ok := s.groupDefinitions[id]
+	if !ok {
+		return GroupDefinition{}, fmt.Errorf("group definition with ID %s not found", id)
+	}
+	return groupDef, nil
+}
+
+// ListGroupDefinitions retrieves all group definitions.
+// Future enhancement: Add filtering by entityID if needed.
+func (s *Store) ListGroupDefinitions() ([]GroupDefinition, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]GroupDefinition, 0, len(s.groupDefinitions))
+	for _, gd := range s.groupDefinitions {
+		list = append(list, gd)
+	}
+	return list, nil
+}
+
+// UpdateGroupDefinition updates an existing group definition.
+func (s *Store) UpdateGroupDefinition(id string, def GroupDefinition) (GroupDefinition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existingDef, ok := s.groupDefinitions[id]
+	if !ok {
+		return GroupDefinition{}, fmt.Errorf("group definition with ID %s not found", id)
+	}
+
+	if def.Name == "" {
+		return GroupDefinition{}, fmt.Errorf("group definition name cannot be empty")
+	}
+	// EntityID cannot be changed for a group definition, so we don't check/update it.
+	// If changing EntityID is a requirement, ensure the new EntityID exists.
+	// For now, we assume EntityID is immutable for a given group.
+	if def.RulesJSON == "" {
+		return GroupDefinition{}, fmt.Errorf("group definition rules_json cannot be empty")
+	}
+
+	existingDef.Name = def.Name
+	existingDef.RulesJSON = def.RulesJSON
+	existingDef.Description = def.Description
+	existingDef.UpdatedAt = time.Now().UTC()
+	s.groupDefinitions[id] = existingDef
+	return existingDef, nil
+}
+
+// DeleteGroupDefinition removes a group definition from the store.
+func (s *Store) DeleteGroupDefinition(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.groupDefinitions[id]; !ok {
+		return fmt.Errorf("group definition with ID %s not found", id)
+	}
+	delete(s.groupDefinitions, id)
+	return nil
+}
+
 // --- Attribute Methods ---
 
 // CreateAttribute adds a new attribute to an entity.
-func (s *Store) CreateAttribute(entityID, name, dataType, description string) (AttributeDefinition, error) {
+func (s *Store) CreateAttribute(entityID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -151,13 +247,16 @@ func (s *Store) CreateAttribute(entityID, name, dataType, description string) (A
 	id := uuid.New().String()
 	now := time.Now().UTC()
 	attr := AttributeDefinition{
-		ID:          id,
-		EntityID:    entityID,
-		Name:        name,
-		DataType:    dataType,
-		Description: description,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           id,
+		EntityID:     entityID,
+		Name:         name,
+		DataType:     dataType,
+		Description:  description,
+		IsFilterable: isFilterable,
+		IsPii:        isPii,
+		IsIndexed:    isIndexed,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	if _, ok := s.attributes[entityID]; !ok {
@@ -199,7 +298,7 @@ func (s *Store) ListAttributes(entityID string) ([]AttributeDefinition, error) {
 }
 
 // UpdateAttribute updates an existing attribute.
-func (s *Store) UpdateAttribute(entityID, attributeID, name, dataType, description string) (AttributeDefinition, error) {
+func (s *Store) UpdateAttribute(entityID, attributeID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -225,6 +324,9 @@ func (s *Store) UpdateAttribute(entityID, attributeID, name, dataType, descripti
 	attr.Name = name
 	attr.DataType = dataType
 	attr.Description = description
+	attr.IsFilterable = isFilterable
+	attr.IsPii = isPii
+	attr.IsIndexed = isIndexed
 	attr.UpdatedAt = time.Now().UTC()
 	s.attributes[entityID][attributeID] = attr
 	return attr, nil
@@ -337,6 +439,7 @@ func (s *Store) UpdateDataSource(id string, config DataSourceConfig) (DataSource
 	existingDs.Name = config.Name
 	existingDs.Type = config.Type
 	existingDs.ConnectionDetails = config.ConnectionDetails
+	existingDs.EntityID = config.EntityID // Update EntityID
 	existingDs.UpdatedAt = time.Now().UTC()
 	s.dataSources[id] = existingDs
 	return existingDs, nil

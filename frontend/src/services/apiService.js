@@ -95,6 +95,13 @@ export const updateFieldMapping = (sourceId, mappingId, fieldMappingData) => {
 
 export const deleteFieldMapping = (sourceId, mappingId) => {
   return apiClient.delete(`/datasources/${sourceId}/mappings/${mappingId}`);
+
+  // Group Definition Endpoints
+  getGroupDefinitions: () => apiClient.get('/groups'),
+  getGroupDefinitionById: (groupId) => apiClient.get(`/groups/${groupId}`),
+  createGroupDefinition: (groupData) => apiClient.post('/groups', groupData),
+  updateGroupDefinition: (groupId, groupData) => apiClient.put(`/groups/${groupId}`, groupData),
+  deleteGroupDefinition: (groupId) => apiClient.delete(`/groups/${groupId}`),
 };
 
 

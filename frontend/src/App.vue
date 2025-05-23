@@ -6,6 +6,7 @@
       <v-btn text to="/">Home (Entities)</v-btn>
       <v-btn text to="/entities">Entities</v-btn>
       <v-btn text to="/datasources">Data Sources</v-btn>
+      <v-btn text to="/groups">Groups</v-btn>
       <!-- Add other navigation items here if needed -->
     </v-app-bar>
 

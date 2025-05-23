@@ -66,6 +66,29 @@ const routes = [
     component: DataSourceDetailView,
     props: true,
   },
+  // Group Definition Routes
+  {
+    path: '/groups',
+    name: 'GroupsView',
+    component: () => import('@/views/GroupsView.vue')
+  },
+  {
+    path: '/groups/new',
+    name: 'GroupCreate',
+    component: () => import('@/views/GroupCreateView.vue')
+  },
+  {
+    path: '/groups/:id/edit',
+    name: 'GroupEdit',
+    component: () => import('@/views/GroupEditView.vue'),
+    props: true
+  },
+  {
+    path: '/groups/:id', // Changed from /details to make it consistent
+    name: 'GroupDetail',
+    component: () => import('@/views/GroupDetailView.vue'),
+    props: true
+  },
   // Fallback route for 404
   {
     path: '/:catchAll(.*)',

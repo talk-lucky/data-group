@@ -37,6 +37,17 @@
             hint="Enter a valid JSON string. For example: {\"host\":\"localhost\", \"port\":5432, \"user\":\"admin\"}"
           ></v-textarea>
 
+          <v-select
+            v-model="formData.entity_id"
+            :items="entityItems"
+            label="Entity (Optional)"
+            prepend-icon="mdi-link-variant"
+            variant="outlined"
+            class="mb-3"
+            clearable
+            density="compact"
+          ></v-select>
+
           <v-alert v-if="formError || dataSourceStore.error" type="error" dense class="mb-4">
             {{ formError || dataSourceStore.error }}
           </v-alert>
@@ -69,19 +80,21 @@
 import { ref, onMounted, watch, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useDataSourceStore } from '@/store/dataSourceStore';
+import { useEntityStore } from '@/store/entityStore'; // Import entity store
 
 const props = defineProps({
-  dataSourceId: { 
+  dataSourceId: {
     type: String,
     default: null,
   },
 });
 
 const router = useRouter();
-const route = useRoute(); 
+const route = useRoute();
 const dataSourceStore = useDataSourceStore();
+const entityStore = useEntityStore(); // Initialize entity store
 
-const formRef = ref(null); 
+const formRef = ref(null);
 const isFormValid = ref(false);
 
 const isEditMode = computed(() => !!props.dataSourceId);
@@ -91,8 +104,16 @@ const formData = ref({
   name: '',
   type: '',
   connection_details: '{}', // Default to an empty JSON object
+  entity_id: null,
 });
 const formError = ref(null);
+
+const entityItems = computed(() => {
+  return entityStore.entities.map(entity => ({
+    title: entity.name,
+    value: entity.id,
+  }));
+});
 
 const snackbar = ref({
   show: false,
@@ -131,13 +152,14 @@ watch(() => props.dataSourceId, (newId) => {
 
 onMounted(() => {
   const idToLoad = props.dataSourceId || route.params.id;
-  if (idToLoad && !isEditMode.value) { 
+  if (idToLoad && !isEditMode.value) {
      console.warn("DataSourceForm: dataSourceId loaded from route params, consider using props for consistency.");
-     loadDataSourceData(idToLoad);
-  } else if (!idToLoad) {
-    resetForm(); 
+     // loadDataSourceData(idToLoad); // This was causing issues, rely on watch or direct prop binding
+  } else if (!idToLoad && !props.dataSourceId) { // Ensure reset only if no ID from prop or route
+    resetForm();
   }
-   validateForm(); 
+  entityStore.fetchEntities(); // Fetch entities for the dropdown
+  validateForm();
 });
 
 async function loadDataSourceData(id) {
@@ -156,6 +178,7 @@ async function loadDataSourceData(id) {
     formData.value.name = dsToEdit.name;
     formData.value.type = dsToEdit.type;
     formData.value.connection_details = dsToEdit.connection_details || '{}';
+    formData.value.entity_id = dsToEdit.entity_id || null;
   } else {
     formError.value = `Data Source with ID ${id} not found.`;
     showSnackbar(formError.value, 'error');
@@ -167,10 +190,11 @@ function resetForm() {
   formData.value.name = '';
   formData.value.type = '';
   formData.value.connection_details = '{}';
+  formData.value.entity_id = null;
   formError.value = null;
   dataSourceStore.clearCurrentDataSource();
   if (formRef.value) {
-    formRef.value.resetValidation(); 
+    formRef.value.resetValidation();
   }
   validateForm();
 }
@@ -201,7 +225,14 @@ async function handleSubmit() {
 
   try {
     let savedDataSource;
-    const dataToSave = { ...formData.value };
+    const dataToSave = { 
+      name: formData.value.name,
+      type: formData.value.type,
+      connection_details: formData.value.connection_details,
+      // Only include entity_id if it has a value
+      ...(formData.value.entity_id && { entity_id: formData.value.entity_id })
+    };
+    
     // Ensure connection_details is a string, even if it's empty JSON object.
     if (typeof dataToSave.connection_details !== 'string') {
         dataToSave.connection_details = JSON.stringify(dataToSave.connection_details);
@@ -215,7 +246,7 @@ async function handleSubmit() {
       savedDataSource = await dataSourceStore.addDataSource(dataToSave);
       showSnackbar(`Data Source "${savedDataSource.name}" created successfully.`, 'success');
     }
-    router.push('/datasources'); 
+    router.push('/datasources');
   } catch (error) {
     formError.value = 'Operation failed: ' + (dataSourceStore.error || error.message || 'Unknown error');
     showSnackbar(formError.value, 'error');

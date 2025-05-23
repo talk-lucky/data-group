@@ -60,6 +60,16 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 			mappingRoutes.DELETE("/:mapping_id", a.deleteFieldMappingHandler)
 		}
 	}
+
+	// Group Definition Routes
+	groupDefinitionRoutes := v1.Group("/groups")
+	{
+		groupDefinitionRoutes.POST("/", a.createGroupDefinitionHandler)
+		groupDefinitionRoutes.GET("/", a.listGroupDefinitionsHandler)
+		groupDefinitionRoutes.GET("/:group_id", a.getGroupDefinitionHandler)
+		groupDefinitionRoutes.PUT("/:group_id", a.updateGroupDefinitionHandler)
+		groupDefinitionRoutes.DELETE("/:group_id", a.deleteGroupDefinitionHandler)
+	}
 }
 
 // --- Entity Handlers ---
@@ -137,9 +147,12 @@ func (a *API) deleteEntityHandler(c *gin.Context) {
 func (a *API) createAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		DataType    string `json:"data_type" binding:"required"`
-		Description string `json:"description"`
+		Name         string `json:"name" binding:"required"`
+		DataType     string `json:"data_type" binding:"required"`
+		Description  string `json:"description"`
+		IsFilterable bool   `json:"is_filterable"`
+		IsPii        bool   `json:"is_pii"`
+		IsIndexed    bool   `json:"is_indexed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
@@ -152,7 +165,7 @@ func (a *API) createAttributeHandler(c *gin.Context) {
 		return
 	}
 
-	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataType, req.Description)
+	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attribute: " + err.Error()})
 		return
@@ -201,9 +214,12 @@ func (a *API) updateAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	attributeID := c.Param("attribute_id")
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		DataType    string `json:"data_type" binding:"required"`
-		Description string `json:"description"`
+		Name         string `json:"name" binding:"required"`
+		DataType     string `json:"data_type" binding:"required"`
+		Description  string `json:"description"`
+		IsFilterable bool   `json:"is_filterable"`
+		IsPii        bool   `json:"is_pii"`
+		IsIndexed    bool   `json:"is_indexed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
@@ -216,7 +232,7 @@ func (a *API) updateAttributeHandler(c *gin.Context) {
 		return
 	}
 
-	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataType, req.Description)
+	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
 	if err != nil {
 		handleStoreError(c, err, "Attribute")
 		return
@@ -253,6 +269,9 @@ func (a *API) createDataSourceHandler(c *gin.Context) {
 	}
 	// ID, CreatedAt, UpdatedAt are set by the store
 	req.ID = ""
+	// Ensure EntityID is passed if provided in the request
+	// The store.CreateDataSource function now expects DataSourceConfig object
+	// which includes EntityID.
 
 	ds, err := a.store.CreateDataSource(req)
 	if err != nil {
@@ -288,6 +307,9 @@ func (a *API) updateDataSourceHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
 		return
 	}
+	// Ensure EntityID is passed if provided in the request for update
+	// The store.UpdateDataSource function now expects DataSourceConfig object
+	// which includes EntityID.
 
 	ds, err := a.store.UpdateDataSource(sourceID, req)
 	if err != nil {
@@ -413,4 +435,82 @@ func handleStoreError(c *gin.Context, err error, resourceName string) {
 	} else {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process " + strings.ToLower(resourceName) + ": " + err.Error()})
 	}
+}
+
+// --- GroupDefinition Handlers ---
+
+// createGroupDefinitionHandler handles requests to create a new group definition.
+func (a *API) createGroupDefinitionHandler(c *gin.Context) {
+	var req GroupDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	// ID, CreatedAt, UpdatedAt are set by the store
+	req.ID = ""
+
+	groupDef, err := a.store.CreateGroupDefinition(req)
+	if err != nil {
+		// Check if it's a "not found" error for the entity_id
+		if strings.Contains(err.Error(), "entity with ID") && strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		} else if strings.Contains(err.Error(), "cannot be empty") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group definition: " + err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, groupDef)
+}
+
+// listGroupDefinitionsHandler handles requests to list all group definitions.
+func (a *API) listGroupDefinitionsHandler(c *gin.Context) {
+	groupDefs, err := a.store.ListGroupDefinitions()
+	if err != nil { // Should generally not happen for a list operation unless there's a fundamental store issue
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list group definitions: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, groupDefs)
+}
+
+// getGroupDefinitionHandler handles requests to get a specific group definition by ID.
+func (a *API) getGroupDefinitionHandler(c *gin.Context) {
+	groupID := c.Param("group_id")
+	groupDef, err := a.store.GetGroupDefinition(groupID)
+	if err != nil {
+		handleStoreError(c, err, "Group Definition")
+		return
+	}
+	c.JSON(http.StatusOK, groupDef)
+}
+
+// updateGroupDefinitionHandler handles requests to update a specific group definition.
+func (a *API) updateGroupDefinitionHandler(c *gin.Context) {
+	groupID := c.Param("group_id")
+	var req GroupDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	// EntityID is not expected to be in the req payload for update, or if it is, it should match existing or be ignored by store.
+	// Store's UpdateGroupDefinition should handle this logic.
+
+	groupDef, err := a.store.UpdateGroupDefinition(groupID, req)
+	if err != nil {
+		handleStoreError(c, err, "Group Definition")
+		return
+	}
+	c.JSON(http.StatusOK, groupDef)
+}
+
+// deleteGroupDefinitionHandler handles requests to delete a specific group definition.
+func (a *API) deleteGroupDefinitionHandler(c *gin.Context) {
+	groupID := c.Param("group_id")
+	err := a.store.DeleteGroupDefinition(groupID)
+	if err != nil {
+		handleStoreError(c, err, "Group Definition")
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
 }

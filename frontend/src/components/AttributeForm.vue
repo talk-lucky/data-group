@@ -37,6 +37,27 @@
           class="mb-3"
         ></v-textarea>
 
+        <v-checkbox
+          v-model="formData.is_filterable"
+          label="Filterable"
+          density="compact"
+          class="mb-1"
+        ></v-checkbox>
+
+        <v-checkbox
+          v-model="formData.is_pii"
+          label="PII (Personally Identifiable Information)"
+          density="compact"
+          class="mb-1"
+        ></v-checkbox>
+
+        <v-checkbox
+          v-model="formData.is_indexed"
+          label="Indexed"
+          density="compact"
+          class="mb-3"
+        ></v-checkbox>
+
         <v-alert v-if="formError || attributeStore.error" type="error" dense class="mb-4">
           {{ formError || attributeStore.error }}
         </v-alert>
@@ -71,7 +92,7 @@ const props = defineProps({
   },
   initialData: { // Pre-fill form for edit mode
     type: Object,
-    default: () => ({ name: '', data_type: '', description: '' }),
+    default: () => ({ name: '', data_type: '', description: '', is_filterable: false, is_pii: false, is_indexed: false }),
   },
 });
 
@@ -88,6 +109,9 @@ const formData = ref({
   name: '',
   data_type: '',
   description: '',
+  is_filterable: false,
+  is_pii: false,
+  is_indexed: false,
 });
 const formError = ref(null);
 
@@ -103,6 +127,9 @@ watch(() => props.initialData, (newData) => {
     formData.value.name = newData.name || '';
     formData.value.data_type = newData.data_type || '';
     formData.value.description = newData.description || '';
+    formData.value.is_filterable = newData.is_filterable || false;
+    formData.value.is_pii = newData.is_pii || false;
+    formData.value.is_indexed = newData.is_indexed || false;
   } else {
     resetFormInternal(); // Reset if not in edit mode or no initial data
   }
@@ -116,6 +143,9 @@ onMounted(() => {
     formData.value.name = props.initialData.name || '';
     formData.value.data_type = props.initialData.data_type || '';
     formData.value.description = props.initialData.description || '';
+    formData.value.is_filterable = props.initialData.is_filterable || false;
+    formData.value.is_pii = props.initialData.is_pii || false;
+    formData.value.is_indexed = props.initialData.is_indexed || false;
   } else {
      resetFormInternal();
   }
@@ -126,6 +156,9 @@ function resetFormInternal() {
   formData.value.name = '';
   formData.value.data_type = '';
   formData.value.description = '';
+  formData.value.is_filterable = false;
+  formData.value.is_pii = false;
+  formData.value.is_indexed = false;
   formError.value = null;
   if (formRefAttr.value) {
     formRefAttr.value.resetValidation();
@@ -142,7 +175,7 @@ async function validateForm() {
   }
 }
 
-watch(formData, () => {
+watch(formData, (). => {
   validateForm();
   formError.value = null; // Clear custom error on input
   attributeStore.error = null; // Clear store error on input
@@ -162,6 +195,9 @@ async function handleSubmit() {
     name: formData.value.name,
     data_type: formData.value.data_type,
     description: formData.value.description,
+    is_filterable: formData.value.is_filterable,
+    is_pii: formData.value.is_pii,
+    is_indexed: formData.value.is_indexed,
   };
 
   try {
