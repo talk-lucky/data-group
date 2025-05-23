@@ -53,4 +53,49 @@ export const deleteAttribute = (entityId, attributeId) => {
   return apiClient.delete(`/entities/${entityId}/attributes/${attributeId}`);
 };
 
+// --- Data Source Endpoints ---
+
+export const getDataSources = () => {
+  return apiClient.get('/datasources/');
+};
+
+export const getDataSourceById = (dataSourceId) => { // Renamed for clarity vs getEntityById
+  return apiClient.get(`/datasources/${dataSourceId}`);
+};
+
+export const createDataSource = (dataSourceData) => {
+  return apiClient.post('/datasources/', dataSourceData);
+};
+
+export const updateDataSource = (dataSourceId, dataSourceData) => {
+  return apiClient.put(`/datasources/${dataSourceId}`, dataSourceData);
+};
+
+export const deleteDataSource = (dataSourceId) => {
+  return apiClient.delete(`/datasources/${dataSourceId}`);
+};
+
+// --- Field Mapping Endpoints ---
+
+export const getFieldMappingsForDataSource = (sourceId) => { // Renamed for clarity
+  return apiClient.get(`/datasources/${sourceId}/mappings/`);
+};
+
+export const getFieldMappingById = (sourceId, mappingId) => { // Renamed
+  return apiClient.get(`/datasources/${sourceId}/mappings/${mappingId}`);
+};
+
+export const createFieldMapping = (sourceId, fieldMappingData) => {
+  return apiClient.post(`/datasources/${sourceId}/mappings/`, fieldMappingData);
+};
+
+export const updateFieldMapping = (sourceId, mappingId, fieldMappingData) => {
+  return apiClient.put(`/datasources/${sourceId}/mappings/${mappingId}`, fieldMappingData);
+};
+
+export const deleteFieldMapping = (sourceId, mappingId) => {
+  return apiClient.delete(`/datasources/${sourceId}/mappings/${mappingId}`);
+};
+
+
 export default apiClient; // Exporting the configured axios instance if direct use is preferred sometimes.

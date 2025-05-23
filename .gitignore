@@ -55,3 +55,6 @@ junit.xml
 /backend/vendor/
 /backend/pkg/
 /backend/cover.out
+
+# Ingestion service specific
+/backend/ingestion/ingestion_service

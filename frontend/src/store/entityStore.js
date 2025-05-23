@@ -14,8 +14,20 @@ export const useEntityStore = defineStore('entity', {
     loading: false,
     error: null,
   }),
+  getters: {
+    allEntities: (state) => state.entities,
+    isLoading: (state) => state.loading,
+    entityOptions: (state) => {
+      return state.entities.map(entity => ({
+        title: entity.name, // Use 'name' for display
+        value: entity.id,   // Use 'id' as the value
+      }));
+    },
+  },
   actions: {
     async fetchEntities() {
+      // Fetch all entities if not already loaded or if a force refresh is needed.
+      // For simplicity, always fetching, but could add a check like `if (this.entities.length === 0 || forceRefresh)`
       this.loading = true;
       this.error = null;
       try {
@@ -49,6 +61,8 @@ export const useEntityStore = defineStore('entity', {
       try {
         const response = await createEntity(entityData);
         this.entities.push(response.data); // Add to local state
+        // Optionally, re-fetch all entities to ensure consistency if backend does more processing
+        // await this.fetchEntities(); 
         return response.data; // Return created entity
       } catch (error) {
         this.error = 'Failed to create entity: ' + (error.response?.data?.error || error.message);
@@ -99,6 +113,7 @@ export const useEntityStore = defineStore('entity', {
     // Helper to clear current entity, e.g., when navigating away
     clearCurrentEntity() {
         this.currentEntity = null;
+        this.error = null; // Also clear error related to current entity
     }
   },
 });

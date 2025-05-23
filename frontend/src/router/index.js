@@ -3,6 +3,12 @@ import EntitiesView from '@/views/EntitiesView.vue';
 import EntityCreateView from '@/views/EntityCreateView.vue';
 import EntityEditView from '@/views/EntityEditView.vue';
 import EntityDetailView from '@/views/EntityDetailView.vue';
+
+import DataSourcesView from '@/views/DataSourcesView.vue';
+import DataSourceCreateView from '@/views/DataSourceCreateView.vue';
+import DataSourceEditView from '@/views/DataSourceEditView.vue';
+import DataSourceDetailView from '@/views/DataSourceDetailView.vue';
+
 // For a default landing page or home, you might create a HomeView
 // import HomeView from '@/views/HomeView.vue';
 
@@ -14,6 +20,7 @@ const routes = [
     // name: 'Home',
     // component: HomeView
   },
+  // Entity Routes
   {
     path: '/entities',
     name: 'EntitiesView',
@@ -28,13 +35,36 @@ const routes = [
     path: '/entities/:id/edit',
     name: 'EntityEditView',
     component: EntityEditView,
-    props: true, // Pass route.params to component props
+    props: true, 
   },
   {
     path: '/entities/:id/details',
     name: 'EntityDetailView',
     component: EntityDetailView,
-    props: true, // Pass route.params to component props
+    props: true, 
+  },
+  // Data Source Routes
+  {
+    path: '/datasources',
+    name: 'DataSourcesView',
+    component: DataSourcesView,
+  },
+  {
+    path: '/datasources/new',
+    name: 'DataSourceCreateView',
+    component: DataSourceCreateView,
+  },
+  {
+    path: '/datasources/:id/edit',
+    name: 'DataSourceEditView',
+    component: DataSourceEditView,
+    props: true,
+  },
+  {
+    path: '/datasources/:id/details',
+    name: 'DataSourceDetailView',
+    component: DataSourceDetailView,
+    props: true,
   },
   // Fallback route for 404
   {
@@ -45,7 +75,7 @@ const routes = [
 ];
 
 const router = createRouter({
-  history: createWebHistory(process.env.BASE_URL || '/'), // Ensure correct base for history
+  history: createWebHistory(process.env.BASE_URL || '/'), 
   routes,
 });
 

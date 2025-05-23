@@ -3,8 +3,9 @@
     <v-app-bar app color="primary" dark>
       <v-toolbar-title>Metadata Management</v-toolbar-title>
       <v-spacer></v-spacer>
-      <v-btn text to="/">Home</v-btn>
+      <v-btn text to="/">Home (Entities)</v-btn>
       <v-btn text to="/entities">Entities</v-btn>
+      <v-btn text to="/datasources">Data Sources</v-btn>
       <!-- Add other navigation items here if needed -->
     </v-app-bar>
 
@@ -16,7 +17,7 @@
 
     <v-footer app color="primary" dark padless>
       <v-col class="text-center" cols="12">
-        &copy; {{ new Date().getFullYear() }} — <strong>My Company</strong>
+        &copy; {{ new Date().getFullYear() }} — <strong>Metadata Management App</strong>
       </v-col>
     </v-footer>
   </v-app>
