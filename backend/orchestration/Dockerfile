@@ -2,24 +2,21 @@
 FROM golang:1.22-alpine AS builder
 
 # Set the Current Working Directory inside the container
-WORKDIR /app/backend/orchestration
+WORKDIR /app
 
-# Copy go mod and sum files
-COPY backend/orchestration/go.mod backend/orchestration/go.sum ./
+# Copy go mod and sum files (assuming Docker context is backend/orchestration/)
+COPY go.mod go.sum ./
 
 # Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download && go mod verify
 
 # Copy the source code into the container
-# Copy models.go, service.go, and main.go
-COPY backend/orchestration/models.go .
-COPY backend/orchestration/service.go .
-COPY backend/orchestration/main.go .
-
+# This will copy main.go, models.go, service.go, etc. from the service's root directory.
+COPY *.go .
 
 # Build the Go app
-# Ensure all necessary .go files are included in the build command if they are in the same package
-RUN CGO_ENABLED=0 GOOS=linux go build -o /orchestration-service main.go models.go service.go
+# The '.' argument tells go build to compile the package in the current directory.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/orchestration-service .
 
 
 # Start a new stage from scratch for a lightweight image
@@ -29,10 +26,10 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 
 # Set the Current Working Directory inside the container
-WORKDIR /root/
+WORKDIR /app/
 
 # Copy the Pre-built binary file from the previous stage
-COPY --from=builder /orchestration-service .
+COPY --from=builder /app/orchestration-service .
 
 # Expose port 8084 to the outside world (or whatever port is configured in main.go)
 EXPOSE 8084

@@ -1,451 +1,243 @@
 package metadata
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
-	"sync"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
-// Store manages metadata entities, attributes, data sources, and field mappings in memory.
-type Store struct {
-	entities      map[string]EntityDefinition
-	attributes    map[string]map[string]AttributeDefinition // Key: EntityID, Key: AttributeID
-	dataSources         map[string]DataSourceConfig
-	fieldMappings       map[string]map[string]DataSourceFieldMapping // Key: SourceID, Key: MappingID
-	groupDefinitions    map[string]GroupDefinition                   // Key: GroupDefinitionID
-	workflowDefinitions map[string]WorkflowDefinition                // Key: WorkflowDefinitionID
-	actionTemplates     map[string]ActionTemplate                    // Key: ActionTemplateID
-	mu                  sync.RWMutex
+// PostgresStore implements the Store interface using a PostgreSQL database.
+type PostgresStore struct {
+	DB *sql.DB
 }
 
-// NewStore creates and returns a new Store.
-func NewStore() *Store {
-	return &Store{
-		entities:            make(map[string]EntityDefinition),
-		attributes:          make(map[string]map[string]AttributeDefinition),
-		dataSources:         make(map[string]DataSourceConfig),
-		fieldMappings:       make(map[string]map[string]DataSourceFieldMapping),
-		groupDefinitions:    make(map[string]GroupDefinition),
-		workflowDefinitions: make(map[string]WorkflowDefinition),
-		actionTemplates:     make(map[string]ActionTemplate),
+// NewPostgresStore creates a new PostgresStore, connects to the database,
+// and ensures the schema is initialized.
+func NewPostgresStore(dataSourceName string) (*PostgresStore, error) {
+	db, err := sql.Open("postgres", dataSourceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+
+	if err = db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	store := &PostgresStore{DB: db}
+	if err = store.initSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	log.Println("Successfully connected to PostgreSQL and initialized schema.")
+	return store, nil
 }
 
-// --- Entity Methods ---
+// initSchema creates the necessary tables if they don't exist.
+func (s *PostgresStore) initSchema() error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for schema initialization: %w", err)
+	}
+	defer tx.Rollback() // Rollback if not committed
 
-// CreateEntity adds a new entity to the store.
-func (s *Store) CreateEntity(name, description string) (EntityDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	schemaStatements := []string{
+		`CREATE TABLE IF NOT EXISTS entity_definitions (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL UNIQUE,
+			description TEXT,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_entity_definitions_name ON entity_definitions(name)`,
 
-	if name == "" {
-		return EntityDefinition{}, fmt.Errorf("entity name cannot be empty")
+		`CREATE TABLE IF NOT EXISTS attribute_definitions (
+			id TEXT PRIMARY KEY,
+			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			data_type VARCHAR(100) NOT NULL,
+			description TEXT,
+			is_filterable BOOLEAN DEFAULT FALSE,
+			is_pii BOOLEAN DEFAULT FALSE,
+			is_indexed BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (entity_id, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_attribute_definitions_entity_id ON attribute_definitions(entity_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_attribute_definitions_name ON attribute_definitions(name)`,
+
+		`CREATE TABLE IF NOT EXISTS data_source_configs (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL UNIQUE,
+			type VARCHAR(100) NOT NULL,
+			connection_details TEXT,
+			entity_id TEXT REFERENCES entity_definitions(id) ON DELETE SET NULL, -- Can be null if not directly tied to one entity
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_data_source_configs_name ON data_source_configs(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_data_source_configs_entity_id ON data_source_configs(entity_id)`,
+		
+		`CREATE TABLE IF NOT EXISTS data_source_field_mappings (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL REFERENCES data_source_configs(id) ON DELETE CASCADE,
+			source_field_name VARCHAR(255) NOT NULL,
+			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
+			attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
+			transformation_rule TEXT,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (source_id, source_field_name, attribute_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_data_source_field_mappings_source_id ON data_source_field_mappings(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_data_source_field_mappings_attribute_id ON data_source_field_mappings(attribute_id)`,
+
+		`CREATE TABLE IF NOT EXISTS group_definitions (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL UNIQUE,
+			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
+			rules_json TEXT,
+			description TEXT,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_group_definitions_name ON group_definitions(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_group_definitions_entity_id ON group_definitions(entity_id)`,
+
+		`CREATE TABLE IF NOT EXISTS workflow_definitions (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL UNIQUE,
+			description TEXT,
+			trigger_type VARCHAR(100),
+			trigger_config TEXT,
+			action_sequence_json TEXT,
+			is_enabled BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_definitions_name ON workflow_definitions(name)`,
+
+		`CREATE TABLE IF NOT EXISTS action_templates (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL UNIQUE,
+			description TEXT,
+			action_type VARCHAR(100),
+			template_content TEXT,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_templates_name ON action_templates(name)`,
 	}
 
-	id := uuid.New().String()
+	for _, stmt := range schemaStatements {
+		_, err := tx.Exec(stmt)
+		if err != nil {
+			return fmt.Errorf("failed to execute schema statement: %s\nError: %w", stmt, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// --- EntityDefinition Methods ---
+
+func (s *PostgresStore) CreateEntity(name, description string) (EntityDefinition, error) {
 	now := time.Now().UTC()
 	entity := EntityDefinition{
-		ID:          id,
+		ID:          uuid.NewString(),
 		Name:        name,
 		Description: description,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	s.entities[id] = entity
-	s.attributes[id] = make(map[string]AttributeDefinition) // Initialize attributes map for the new entity
+	query := `INSERT INTO entity_definitions (id, name, description, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5)`
+	_, err := s.DB.Exec(query, entity.ID, entity.Name, entity.Description, entity.CreatedAt, entity.UpdatedAt)
+	if err != nil {
+		return EntityDefinition{}, fmt.Errorf("CreateEntity failed: %w", err)
+	}
 	return entity, nil
 }
 
-// GetEntity retrieves an entity by its ID.
-func (s *Store) GetEntity(id string) (EntityDefinition, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	entity, ok := s.entities[id]
-	return entity, ok
-}
-
-// ListEntities retrieves all entities.
-func (s *Store) ListEntities() []EntityDefinition {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]EntityDefinition, 0, len(s.entities))
-	for _, entity := range s.entities {
-		list = append(list, entity)
+func (s *PostgresStore) GetEntity(id string) (EntityDefinition, error) {
+	var entity EntityDefinition
+	query := `SELECT id, name, description, created_at, updated_at FROM entity_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EntityDefinition{}, sql.ErrNoRows
+		}
+		return EntityDefinition{}, fmt.Errorf("GetEntity failed: %w", err)
 	}
-	return list
-}
-
-// UpdateEntity updates an existing entity.
-func (s *Store) UpdateEntity(id, name, description string) (EntityDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	entity, ok := s.entities[id]
-	if !ok {
-		return EntityDefinition{}, fmt.Errorf("entity with ID %s not found", id)
-	}
-
-	if name == "" {
-		return EntityDefinition{}, fmt.Errorf("entity name cannot be empty")
-	}
-
-	entity.Name = name
-	entity.Description = description
-	entity.UpdatedAt = time.Now().UTC()
-	s.entities[id] = entity
 	return entity, nil
 }
 
-// DeleteEntity removes an entity and its attributes from the store.
-// It also removes any field mappings associated with this entity or its attributes.
-func (s *Store) DeleteEntity(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.entities[id]; !ok {
-		return fmt.Errorf("entity with ID %s not found", id)
+func (s *PostgresStore) ListEntities() ([]EntityDefinition, error) {
+	var entities []EntityDefinition
+	query := `SELECT id, name, description, created_at, updated_at FROM entity_definitions ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("ListEntities failed: %w", err)
 	}
+	defer rows.Close()
 
-	// Get all attributes for the entity to be deleted
-	attrsToDelete := make(map[string]struct{})
-	if entityAttrs, ok := s.attributes[id]; ok {
-		for attrID := range entityAttrs {
-			attrsToDelete[attrID] = struct{}{}
+	for rows.Next() {
+		var entity EntityDefinition
+		if err := rows.Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("ListEntities row scan failed: %w", err)
 		}
+		entities = append(entities, entity)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListEntities rows iteration error: %w", err)
+	}
+	return entities, nil
+}
 
-	// Remove field mappings associated with the entity or its attributes
-	for sourceID, mappings := range s.fieldMappings {
-		for mappingID, mapping := range mappings {
-			if mapping.EntityID == id { // Mapping directly to the entity (if that's a use case)
-				delete(s.fieldMappings[sourceID], mappingID)
-				continue
-			}
-			if _, isAttrToDelete := attrsToDelete[mapping.AttributeID]; isAttrToDelete {
-				delete(s.fieldMappings[sourceID], mappingID)
-			}
+func (s *PostgresStore) UpdateEntity(id, name, description string) (EntityDefinition, error) {
+	now := time.Now().UTC()
+	query := `UPDATE entity_definitions SET name = $1, description = $2, updated_at = $3 WHERE id = $4
+              RETURNING id, name, description, created_at, updated_at`
+	var entity EntityDefinition
+	err := s.DB.QueryRow(query, name, description, now, id).Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EntityDefinition{}, sql.ErrNoRows // Or a custom "not found" error
 		}
-		if len(s.fieldMappings[sourceID]) == 0 {
-			delete(s.fieldMappings, sourceID)
-		}
+		return EntityDefinition{}, fmt.Errorf("UpdateEntity failed: %w", err)
 	}
+	return entity, nil
+}
 
-	delete(s.entities, id)
-	delete(s.attributes, id) // Also delete associated attributes
+func (s *PostgresStore) DeleteEntity(id string) error {
+	query := `DELETE FROM entity_definitions WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteEntity failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteEntity failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows // Or a custom "not found" error
+	}
 	return nil
 }
 
-// --- WorkflowDefinition Methods ---
+// --- AttributeDefinition Methods ---
 
-// CreateWorkflowDefinition adds a new workflow definition to the store.
-func (s *Store) CreateWorkflowDefinition(def WorkflowDefinition) (WorkflowDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if def.Name == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow name cannot be empty")
-	}
-	if def.TriggerType == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_type cannot be empty")
-	}
-	if def.TriggerConfig == "" { // Basic validation, could be more specific JSON check
-		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_config cannot be empty")
-	}
-	if def.ActionSequenceJSON == "" { // Basic validation
-		return WorkflowDefinition{}, fmt.Errorf("workflow action_sequence_json cannot be empty")
-	}
-	// Add more validation for TriggerConfig and ActionSequenceJSON (e.g., JSON validity) if needed.
-
-	id := uuid.New().String()
-	now := time.Now().UTC()
-	def.ID = id
-	def.CreatedAt = now
-	def.UpdatedAt = now
-	// IsEnabled defaults to false if not provided, which is fine.
-
-	s.workflowDefinitions[id] = def
-	return def, nil
-}
-
-// GetWorkflowDefinition retrieves a workflow definition by its ID.
-func (s *Store) GetWorkflowDefinition(id string) (WorkflowDefinition, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	wd, ok := s.workflowDefinitions[id]
-	if !ok {
-		return WorkflowDefinition{}, fmt.Errorf("workflow definition with ID %s not found", id)
-	}
-	return wd, nil
-}
-
-// ListWorkflowDefinitions retrieves all workflow definitions.
-func (s *Store) ListWorkflowDefinitions() ([]WorkflowDefinition, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]WorkflowDefinition, 0, len(s.workflowDefinitions))
-	for _, wd := range s.workflowDefinitions {
-		list = append(list, wd)
-	}
-	return list, nil
-}
-
-// UpdateWorkflowDefinition updates an existing workflow definition.
-func (s *Store) UpdateWorkflowDefinition(id string, def WorkflowDefinition) (WorkflowDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existingDef, ok := s.workflowDefinitions[id]
-	if !ok {
-		return WorkflowDefinition{}, fmt.Errorf("workflow definition with ID %s not found", id)
-	}
-
-	if def.Name == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow name cannot be empty")
-	}
-	if def.TriggerType == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_type cannot be empty")
-	}
-	if def.TriggerConfig == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow trigger_config cannot be empty")
-	}
-	if def.ActionSequenceJSON == "" {
-		return WorkflowDefinition{}, fmt.Errorf("workflow action_sequence_json cannot be empty")
-	}
-
-	existingDef.Name = def.Name
-	existingDef.Description = def.Description
-	existingDef.TriggerType = def.TriggerType
-	existingDef.TriggerConfig = def.TriggerConfig
-	existingDef.ActionSequenceJSON = def.ActionSequenceJSON
-	existingDef.IsEnabled = def.IsEnabled // Ensure IsEnabled can be updated
-	existingDef.UpdatedAt = time.Now().UTC()
-
-	s.workflowDefinitions[id] = existingDef
-	return existingDef, nil
-}
-
-// DeleteWorkflowDefinition removes a workflow definition from the store.
-func (s *Store) DeleteWorkflowDefinition(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.workflowDefinitions[id]; !ok {
-		return fmt.Errorf("workflow definition with ID %s not found", id)
-	}
-	delete(s.workflowDefinitions, id)
-	return nil
-}
-
-// --- ActionTemplate Methods ---
-
-// CreateActionTemplate adds a new action template to the store.
-func (s *Store) CreateActionTemplate(tmpl ActionTemplate) (ActionTemplate, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if tmpl.Name == "" {
-		return ActionTemplate{}, fmt.Errorf("action template name cannot be empty")
-	}
-	if tmpl.ActionType == "" {
-		return ActionTemplate{}, fmt.Errorf("action template action_type cannot be empty")
-	}
-	if tmpl.TemplateContent == "" { // Basic validation
-		return ActionTemplate{}, fmt.Errorf("action template template_content cannot be empty")
-	}
-	// Add more validation for TemplateContent (e.g., JSON validity) if needed.
-
-
-	id := uuid.New().String()
-	now := time.Now().UTC()
-	tmpl.ID = id
-	tmpl.CreatedAt = now
-	tmpl.UpdatedAt = now
-
-	s.actionTemplates[id] = tmpl
-	return tmpl, nil
-}
-
-// GetActionTemplate retrieves an action template by its ID.
-func (s *Store) GetActionTemplate(id string) (ActionTemplate, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	at, ok := s.actionTemplates[id]
-	if !ok {
-		return ActionTemplate{}, fmt.Errorf("action template with ID %s not found", id)
-	}
-	return at, nil
-}
-
-// ListActionTemplates retrieves all action templates.
-func (s *Store) ListActionTemplates() ([]ActionTemplate, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]ActionTemplate, 0, len(s.actionTemplates))
-	for _, at := range s.actionTemplates {
-		list = append(list, at)
-	}
-	return list, nil
-}
-
-// UpdateActionTemplate updates an existing action template.
-func (s *Store) UpdateActionTemplate(id string, tmpl ActionTemplate) (ActionTemplate, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existingTmpl, ok := s.actionTemplates[id]
-	if !ok {
-		return ActionTemplate{}, fmt.Errorf("action template with ID %s not found", id)
-	}
-
-	if tmpl.Name == "" {
-		return ActionTemplate{}, fmt.Errorf("action template name cannot be empty")
-	}
-	if tmpl.ActionType == "" {
-		return ActionTemplate{}, fmt.Errorf("action template action_type cannot be empty")
-	}
-	if tmpl.TemplateContent == "" {
-		return ActionTemplate{}, fmt.Errorf("action template template_content cannot be empty")
-	}
-
-	existingTmpl.Name = tmpl.Name
-	existingTmpl.Description = tmpl.Description
-	existingTmpl.ActionType = tmpl.ActionType
-	existingTmpl.TemplateContent = tmpl.TemplateContent
-	existingTmpl.UpdatedAt = time.Now().UTC()
-
-	s.actionTemplates[id] = existingTmpl
-	return existingTmpl, nil
-}
-
-// DeleteActionTemplate removes an action template from the store.
-func (s *Store) DeleteActionTemplate(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.actionTemplates[id]; !ok {
-		return fmt.Errorf("action template with ID %s not found", id)
-	}
-	delete(s.actionTemplates, id)
-	return nil
-}
-
-// --- GroupDefinition Methods ---
-
-// CreateGroupDefinition adds a new group definition to the store.
-func (s *Store) CreateGroupDefinition(def GroupDefinition) (GroupDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if def.Name == "" {
-		return GroupDefinition{}, fmt.Errorf("group definition name cannot be empty")
-	}
-	if def.EntityID == "" {
-		return GroupDefinition{}, fmt.Errorf("group definition entity_id cannot be empty")
-	}
-	if _, ok := s.entities[def.EntityID]; !ok {
-		return GroupDefinition{}, fmt.Errorf("entity with ID %s not found", def.EntityID)
-	}
-	if def.RulesJSON == "" { // Basic check for non-empty rules
-		return GroupDefinition{}, fmt.Errorf("group definition rules_json cannot be empty")
-	}
-	// A more sophisticated JSON validation could be added here if needed.
-
-	id := uuid.New().String()
-	now := time.Now().UTC()
-	def.ID = id
-	def.CreatedAt = now
-	def.UpdatedAt = now
-
-	s.groupDefinitions[id] = def
-	return def, nil
-}
-
-// GetGroupDefinition retrieves a group definition by its ID.
-func (s *Store) GetGroupDefinition(id string) (GroupDefinition, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	groupDef, ok := s.groupDefinitions[id]
-	if !ok {
-		return GroupDefinition{}, fmt.Errorf("group definition with ID %s not found", id)
-	}
-	return groupDef, nil
-}
-
-// ListGroupDefinitions retrieves all group definitions.
-// Future enhancement: Add filtering by entityID if needed.
-func (s *Store) ListGroupDefinitions() ([]GroupDefinition, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]GroupDefinition, 0, len(s.groupDefinitions))
-	for _, gd := range s.groupDefinitions {
-		list = append(list, gd)
-	}
-	return list, nil
-}
-
-// UpdateGroupDefinition updates an existing group definition.
-func (s *Store) UpdateGroupDefinition(id string, def GroupDefinition) (GroupDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existingDef, ok := s.groupDefinitions[id]
-	if !ok {
-		return GroupDefinition{}, fmt.Errorf("group definition with ID %s not found", id)
-	}
-
-	if def.Name == "" {
-		return GroupDefinition{}, fmt.Errorf("group definition name cannot be empty")
-	}
-	// EntityID cannot be changed for a group definition, so we don't check/update it.
-	// If changing EntityID is a requirement, ensure the new EntityID exists.
-	// For now, we assume EntityID is immutable for a given group.
-	if def.RulesJSON == "" {
-		return GroupDefinition{}, fmt.Errorf("group definition rules_json cannot be empty")
-	}
-
-	existingDef.Name = def.Name
-	existingDef.RulesJSON = def.RulesJSON
-	existingDef.Description = def.Description
-	existingDef.UpdatedAt = time.Now().UTC()
-	s.groupDefinitions[id] = existingDef
-	return existingDef, nil
-}
-
-// DeleteGroupDefinition removes a group definition from the store.
-func (s *Store) DeleteGroupDefinition(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.groupDefinitions[id]; !ok {
-		return fmt.Errorf("group definition with ID %s not found", id)
-	}
-	delete(s.groupDefinitions, id)
-	return nil
-}
-
-// --- Attribute Methods ---
-
-// CreateAttribute adds a new attribute to an entity.
-func (s *Store) CreateAttribute(entityID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.entities[entityID]; !ok {
-		return AttributeDefinition{}, fmt.Errorf("entity with ID %s not found", entityID)
-	}
-	if name == "" {
-		return AttributeDefinition{}, fmt.Errorf("attribute name cannot be empty")
-	}
-	if dataType == "" {
-		return AttributeDefinition{}, fmt.Errorf("attribute dataType cannot be empty")
-	}
-
-	id := uuid.New().String()
+func (s *PostgresStore) CreateAttribute(entityID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
 	now := time.Now().UTC()
 	attr := AttributeDefinition{
-		ID:           id,
+		ID:           uuid.NewString(),
 		EntityID:     entityID,
 		Name:         name,
 		DataType:     dataType,
@@ -456,339 +248,578 @@ func (s *Store) CreateAttribute(entityID, name, dataType, description string, is
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-
-	if _, ok := s.attributes[entityID]; !ok {
-		s.attributes[entityID] = make(map[string]AttributeDefinition)
+	query := `INSERT INTO attribute_definitions 
+              (id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err := s.DB.Exec(query, attr.ID, attr.EntityID, attr.Name, attr.DataType, attr.Description, attr.IsFilterable, attr.IsPii, attr.IsIndexed, attr.CreatedAt, attr.UpdatedAt)
+	if err != nil {
+		return AttributeDefinition{}, fmt.Errorf("CreateAttribute failed: %w", err)
 	}
-	s.attributes[entityID][id] = attr
 	return attr, nil
 }
 
-// GetAttribute retrieves an attribute by its ID for a given entity.
-func (s *Store) GetAttribute(entityID, attributeID string) (AttributeDefinition, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	entityAttributes, ok := s.attributes[entityID]
-	if !ok {
-		return AttributeDefinition{}, false
+func (s *PostgresStore) GetAttribute(entityID, attributeID string) (AttributeDefinition, error) {
+	var attr AttributeDefinition
+	query := `SELECT id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at 
+              FROM attribute_definitions WHERE entity_id = $1 AND id = $2`
+	err := s.DB.QueryRow(query, entityID, attributeID).Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AttributeDefinition{}, sql.ErrNoRows
+		}
+		return AttributeDefinition{}, fmt.Errorf("GetAttribute failed: %w", err)
 	}
-	attribute, ok := entityAttributes[attributeID]
-	return attribute, ok
-}
-
-// ListAttributes retrieves all attributes for a given entity.
-func (s *Store) ListAttributes(entityID string) ([]AttributeDefinition, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if _, ok := s.entities[entityID]; !ok {
-		return nil, fmt.Errorf("entity with ID %s not found", entityID)
-	}
-	entityAttributes, ok := s.attributes[entityID]
-	if !ok {
-		// This case should ideally not happen if entities always have an attribute map initialized
-		return []AttributeDefinition{}, nil
-	}
-	list := make([]AttributeDefinition, 0, len(entityAttributes))
-	for _, attr := range entityAttributes {
-		list = append(list, attr)
-	}
-	return list, nil
-}
-
-// UpdateAttribute updates an existing attribute.
-func (s *Store) UpdateAttribute(entityID, attributeID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.entities[entityID]; !ok {
-		return AttributeDefinition{}, fmt.Errorf("entity with ID %s not found", entityID)
-	}
-	entityAttributes, ok := s.attributes[entityID]
-	if !ok {
-		return AttributeDefinition{}, fmt.Errorf("no attributes found for entity ID %s", entityID)
-	}
-	attr, ok := entityAttributes[attributeID]
-	if !ok {
-		return AttributeDefinition{}, fmt.Errorf("attribute with ID %s not found for entity ID %s", attributeID, entityID)
-	}
-
-	if name == "" {
-		return AttributeDefinition{}, fmt.Errorf("attribute name cannot be empty")
-	}
-	if dataType == "" {
-		return AttributeDefinition{}, fmt.Errorf("attribute dataType cannot be empty")
-	}
-
-	attr.Name = name
-	attr.DataType = dataType
-	attr.Description = description
-	attr.IsFilterable = isFilterable
-	attr.IsPii = isPii
-	attr.IsIndexed = isIndexed
-	attr.UpdatedAt = time.Now().UTC()
-	s.attributes[entityID][attributeID] = attr
 	return attr, nil
 }
 
-// DeleteAttribute removes an attribute from an entity.
-// It also removes any field mappings associated with this attribute.
-func (s *Store) DeleteAttribute(entityID, attributeID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *PostgresStore) ListAttributes(entityID string) ([]AttributeDefinition, error) {
+	var attrs []AttributeDefinition
+	query := `SELECT id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at 
+              FROM attribute_definitions WHERE entity_id = $1 ORDER BY name`
+	rows, err := s.DB.Query(query, entityID)
+	if err != nil {
+		return nil, fmt.Errorf("ListAttributes failed: %w", err)
+	}
+	defer rows.Close()
 
-	if _, ok := s.entities[entityID]; !ok {
-		return fmt.Errorf("entity with ID %s not found", entityID)
-	}
-	entityAttributes, ok := s.attributes[entityID]
-	if !ok {
-		return fmt.Errorf("no attributes found for entity ID %s", entityID)
-	}
-	if _, ok := entityAttributes[attributeID]; !ok {
-		return fmt.Errorf("attribute with ID %s not found for entity ID %s", attributeID, entityID)
-	}
-
-	// Remove field mappings associated with the attribute
-	for sourceID, mappings := range s.fieldMappings {
-		for mappingID, mapping := range mappings {
-			if mapping.AttributeID == attributeID {
-				delete(s.fieldMappings[sourceID], mappingID)
-			}
+	for rows.Next() {
+		var attr AttributeDefinition
+		if err := rows.Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("ListAttributes row scan failed: %w", err)
 		}
-		if len(s.fieldMappings[sourceID]) == 0 {
-			delete(s.fieldMappings, sourceID)
-		}
+		attrs = append(attrs, attr)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListAttributes rows iteration error: %w", err)
+	}
+	return attrs, nil
+}
 
-	delete(s.attributes[entityID], attributeID)
+func (s *PostgresStore) UpdateAttribute(entityID, attributeID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
+	now := time.Now().UTC()
+	query := `UPDATE attribute_definitions 
+              SET name = $1, data_type = $2, description = $3, is_filterable = $4, is_pii = $5, is_indexed = $6, updated_at = $7 
+              WHERE entity_id = $8 AND id = $9
+              RETURNING id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at`
+	var attr AttributeDefinition
+	err := s.DB.QueryRow(query, name, dataType, description, isFilterable, isPii, isIndexed, now, entityID, attributeID).Scan(
+		&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AttributeDefinition{}, sql.ErrNoRows
+		}
+		return AttributeDefinition{}, fmt.Errorf("UpdateAttribute failed: %w", err)
+	}
+	return attr, nil
+}
+
+func (s *PostgresStore) DeleteAttribute(entityID, attributeID string) error {
+	query := `DELETE FROM attribute_definitions WHERE entity_id = $1 AND id = $2`
+	result, err := s.DB.Exec(query, entityID, attributeID)
+	if err != nil {
+		return fmt.Errorf("DeleteAttribute failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteAttribute failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
 	return nil
 }
 
 // --- DataSourceConfig Methods ---
 
-// CreateDataSource adds a new data source configuration to the store.
-func (s *Store) CreateDataSource(config DataSourceConfig) (DataSourceConfig, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if config.Name == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source name cannot be empty")
-	}
-	if config.Type == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source type cannot be empty")
-	}
-	// Basic validation for ConnectionDetails, could be more sophisticated
-	if config.ConnectionDetails == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source connection details cannot be empty")
-	}
-
-	id := uuid.New().String()
+func (s *PostgresStore) CreateDataSource(config DataSourceConfig) (DataSourceConfig, error) {
 	now := time.Now().UTC()
-	config.ID = id
+	if config.ID == "" {
+		config.ID = uuid.NewString()
+	}
 	config.CreatedAt = now
 	config.UpdatedAt = now
 
-	s.dataSources[id] = config
-	s.fieldMappings[id] = make(map[string]DataSourceFieldMapping) // Initialize field mappings map for this source
+	query := `INSERT INTO data_source_configs (id, name, type, connection_details, entity_id, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := s.DB.Exec(query, config.ID, config.Name, config.Type, config.ConnectionDetails, sql.NullString{String: config.EntityID, Valid: config.EntityID != ""}, config.CreatedAt, config.UpdatedAt)
+	if err != nil {
+		return DataSourceConfig{}, fmt.Errorf("CreateDataSource failed: %w", err)
+	}
 	return config, nil
 }
 
-// GetDataSources retrieves all data source configurations.
-func (s *Store) GetDataSources() ([]DataSourceConfig, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]DataSourceConfig, 0, len(s.dataSources))
-	for _, ds := range s.dataSources {
-		list = append(list, ds)
+func (s *PostgresStore) GetDataSources() ([]DataSourceConfig, error) {
+	var configs []DataSourceConfig
+	query := `SELECT id, name, type, connection_details, entity_id, created_at, updated_at FROM data_source_configs ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("GetDataSources failed: %w", err)
 	}
-	return list, nil
+	defer rows.Close()
+
+	for rows.Next() {
+		var config DataSourceConfig
+		var entityID sql.NullString
+		if err := rows.Scan(&config.ID, &config.Name, &config.Type, &config.ConnectionDetails, &entityID, &config.CreatedAt, &config.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("GetDataSources row scan failed: %w", err)
+		}
+		if entityID.Valid {
+			config.EntityID = entityID.String
+		}
+		configs = append(configs, config)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetDataSources rows iteration error: %w", err)
+	}
+	return configs, nil
 }
 
-// GetDataSource retrieves a data source configuration by its ID.
-func (s *Store) GetDataSource(id string) (DataSourceConfig, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	ds, ok := s.dataSources[id]
-	if !ok {
-		return DataSourceConfig{}, fmt.Errorf("data source with ID %s not found", id)
+func (s *PostgresStore) GetDataSource(id string) (DataSourceConfig, error) {
+	var config DataSourceConfig
+	var entityID sql.NullString
+	query := `SELECT id, name, type, connection_details, entity_id, created_at, updated_at FROM data_source_configs WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(&config.ID, &config.Name, &config.Type, &config.ConnectionDetails, &entityID, &config.CreatedAt, &config.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DataSourceConfig{}, sql.ErrNoRows
+		}
+		return DataSourceConfig{}, fmt.Errorf("GetDataSource failed: %w", err)
 	}
-	return ds, nil
+	if entityID.Valid {
+		config.EntityID = entityID.String
+	}
+	return config, nil
 }
 
-// UpdateDataSource updates an existing data source configuration.
-func (s *Store) UpdateDataSource(id string, config DataSourceConfig) (DataSourceConfig, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *PostgresStore) UpdateDataSource(id string, config DataSourceConfig) (DataSourceConfig, error) {
+	now := time.Now().UTC()
+	config.UpdatedAt = now
+	config.ID = id // Ensure ID is the one from path param
 
-	existingDs, ok := s.dataSources[id]
-	if !ok {
-		return DataSourceConfig{}, fmt.Errorf("data source with ID %s not found", id)
+	query := `UPDATE data_source_configs 
+              SET name = $1, type = $2, connection_details = $3, entity_id = $4, updated_at = $5 
+              WHERE id = $6
+              RETURNING id, name, type, connection_details, entity_id, created_at, updated_at`
+	var updatedConfig DataSourceConfig
+	var entityID sql.NullString
+	err := s.DB.QueryRow(query, config.Name, config.Type, config.ConnectionDetails, sql.NullString{String: config.EntityID, Valid: config.EntityID != ""}, config.UpdatedAt, config.ID).Scan(
+		&updatedConfig.ID, &updatedConfig.Name, &updatedConfig.Type, &updatedConfig.ConnectionDetails, &entityID, &updatedConfig.CreatedAt, &updatedConfig.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DataSourceConfig{}, sql.ErrNoRows
+		}
+		return DataSourceConfig{}, fmt.Errorf("UpdateDataSource failed: %w", err)
 	}
-
-	if config.Name == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source name cannot be empty")
+	if entityID.Valid {
+		updatedConfig.EntityID = entityID.String
 	}
-	if config.Type == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source type cannot be empty")
-	}
-	if config.ConnectionDetails == "" {
-		return DataSourceConfig{}, fmt.Errorf("data source connection details cannot be empty")
-	}
-
-	existingDs.Name = config.Name
-	existingDs.Type = config.Type
-	existingDs.ConnectionDetails = config.ConnectionDetails
-	existingDs.EntityID = config.EntityID // Update EntityID
-	existingDs.UpdatedAt = time.Now().UTC()
-	s.dataSources[id] = existingDs
-	return existingDs, nil
+	return updatedConfig, nil
 }
 
-// DeleteDataSource removes a data source configuration and its associated field mappings.
-func (s *Store) DeleteDataSource(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.dataSources[id]; !ok {
-		return fmt.Errorf("data source with ID %s not found", id)
+func (s *PostgresStore) DeleteDataSource(id string) error {
+	query := `DELETE FROM data_source_configs WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteDataSource failed: %w", err)
 	}
-	delete(s.dataSources, id)
-	delete(s.fieldMappings, id) // Also delete all associated field mappings
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteDataSource failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
 	return nil
 }
 
 // --- DataSourceFieldMapping Methods ---
 
-// CreateFieldMapping adds a new field mapping to a data source.
-func (s *Store) CreateFieldMapping(mapping DataSourceFieldMapping) (DataSourceFieldMapping, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.dataSources[mapping.SourceID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("data source with ID %s not found", mapping.SourceID)
-	}
-	if _, ok := s.entities[mapping.EntityID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("entity with ID %s not found", mapping.EntityID)
-	}
-	if entityAttrs, ok := s.attributes[mapping.EntityID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("no attributes found for entity ID %s", mapping.EntityID)
-	} else if _, ok := entityAttrs[mapping.AttributeID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("attribute with ID %s not found for entity ID %s", mapping.AttributeID, mapping.EntityID)
-	}
-
-	if mapping.SourceFieldName == "" {
-		return DataSourceFieldMapping{}, fmt.Errorf("source field name cannot be empty")
-	}
-
-	id := uuid.New().String()
+func (s *PostgresStore) CreateFieldMapping(mapping DataSourceFieldMapping) (DataSourceFieldMapping, error) {
 	now := time.Now().UTC()
-	mapping.ID = id
+	if mapping.ID == "" {
+		mapping.ID = uuid.NewString()
+	}
 	mapping.CreatedAt = now
 	mapping.UpdatedAt = now
 
-	if _, ok := s.fieldMappings[mapping.SourceID]; !ok {
-		s.fieldMappings[mapping.SourceID] = make(map[string]DataSourceFieldMapping)
+	query := `INSERT INTO data_source_field_mappings 
+              (id, source_id, source_field_name, entity_id, attribute_id, transformation_rule, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	_, err := s.DB.Exec(query, mapping.ID, mapping.SourceID, mapping.SourceFieldName, mapping.EntityID, mapping.AttributeID, mapping.TransformationRule, mapping.CreatedAt, mapping.UpdatedAt)
+	if err != nil {
+		return DataSourceFieldMapping{}, fmt.Errorf("CreateFieldMapping failed: %w", err)
 	}
-	s.fieldMappings[mapping.SourceID][id] = mapping
 	return mapping, nil
 }
 
-// GetFieldMappings retrieves all field mappings for a given data source.
-func (s *Store) GetFieldMappings(sourceID string) ([]DataSourceFieldMapping, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if _, ok := s.dataSources[sourceID]; !ok {
-		return nil, fmt.Errorf("data source with ID %s not found", sourceID)
+func (s *PostgresStore) GetFieldMappings(sourceID string) ([]DataSourceFieldMapping, error) {
+	var mappings []DataSourceFieldMapping
+	query := `SELECT id, source_id, source_field_name, entity_id, attribute_id, transformation_rule, created_at, updated_at 
+              FROM data_source_field_mappings WHERE source_id = $1 ORDER BY source_field_name`
+	rows, err := s.DB.Query(query, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("GetFieldMappings failed: %w", err)
 	}
+	defer rows.Close()
 
-	sourceMappings, ok := s.fieldMappings[sourceID]
-	if !ok {
-		return []DataSourceFieldMapping{}, nil // No mappings yet for this source
+	for rows.Next() {
+		var m DataSourceFieldMapping
+		if err := rows.Scan(&m.ID, &m.SourceID, &m.SourceFieldName, &m.EntityID, &m.AttributeID, &m.TransformationRule, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("GetFieldMappings row scan failed: %w", err)
+		}
+		mappings = append(mappings, m)
 	}
-
-	list := make([]DataSourceFieldMapping, 0, len(sourceMappings))
-	for _, fm := range sourceMappings {
-		list = append(list, fm)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetFieldMappings rows iteration error: %w", err)
 	}
-	return list, nil
+	return mappings, nil
 }
 
-// GetFieldMapping retrieves a specific field mapping by its ID for a given data source.
-func (s *Store) GetFieldMapping(sourceID, mappingID string) (DataSourceFieldMapping, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if _, ok := s.dataSources[sourceID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("data source with ID %s not found", sourceID)
+func (s *PostgresStore) GetFieldMapping(sourceID, mappingID string) (DataSourceFieldMapping, error) {
+	var m DataSourceFieldMapping
+	query := `SELECT id, source_id, source_field_name, entity_id, attribute_id, transformation_rule, created_at, updated_at 
+              FROM data_source_field_mappings WHERE source_id = $1 AND id = $2`
+	err := s.DB.QueryRow(query, sourceID, mappingID).Scan(&m.ID, &m.SourceID, &m.SourceFieldName, &m.EntityID, &m.AttributeID, &m.TransformationRule, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DataSourceFieldMapping{}, sql.ErrNoRows
+		}
+		return DataSourceFieldMapping{}, fmt.Errorf("GetFieldMapping failed: %w", err)
 	}
-	sourceMappings, ok := s.fieldMappings[sourceID]
-	if !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("no field mappings found for data source ID %s", sourceID)
-	}
-	fm, ok := sourceMappings[mappingID]
-	if !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("field mapping with ID %s not found for data source ID %s", mappingID, sourceID)
-	}
-	return fm, nil
+	return m, nil
 }
 
-// UpdateFieldMapping updates an existing field mapping.
-func (s *Store) UpdateFieldMapping(sourceID, mappingID string, mapping DataSourceFieldMapping) (DataSourceFieldMapping, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *PostgresStore) UpdateFieldMapping(sourceID, mappingID string, mapping DataSourceFieldMapping) (DataSourceFieldMapping, error) {
+	now := time.Now().UTC()
+	mapping.UpdatedAt = now
+	mapping.ID = mappingID
+	mapping.SourceID = sourceID
 
-	if _, ok := s.dataSources[sourceID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("data source with ID %s not found", sourceID)
+	query := `UPDATE data_source_field_mappings 
+              SET source_field_name = $1, entity_id = $2, attribute_id = $3, transformation_rule = $4, updated_at = $5 
+              WHERE source_id = $6 AND id = $7
+              RETURNING id, source_id, source_field_name, entity_id, attribute_id, transformation_rule, created_at, updated_at`
+	var updatedMapping DataSourceFieldMapping
+	err := s.DB.QueryRow(query, mapping.SourceFieldName, mapping.EntityID, mapping.AttributeID, mapping.TransformationRule, mapping.UpdatedAt, mapping.SourceID, mapping.ID).Scan(
+		&updatedMapping.ID, &updatedMapping.SourceID, &updatedMapping.SourceFieldName, &updatedMapping.EntityID, &updatedMapping.AttributeID, &updatedMapping.TransformationRule, &updatedMapping.CreatedAt, &updatedMapping.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DataSourceFieldMapping{}, sql.ErrNoRows
+		}
+		return DataSourceFieldMapping{}, fmt.Errorf("UpdateFieldMapping failed: %w", err)
 	}
-	if _, ok := s.entities[mapping.EntityID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("entity with ID %s not found", mapping.EntityID)
-	}
-	if entityAttrs, ok := s.attributes[mapping.EntityID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("no attributes found for entity ID %s", mapping.EntityID)
-	} else if _, ok := entityAttrs[mapping.AttributeID]; !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("attribute with ID %s not found for entity ID %s", mapping.AttributeID, mapping.EntityID)
-	}
-
-	sourceMappings, ok := s.fieldMappings[sourceID]
-	if !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("no field mappings found for data source ID %s", sourceID)
-	}
-	existingFm, ok := sourceMappings[mappingID]
-	if !ok {
-		return DataSourceFieldMapping{}, fmt.Errorf("field mapping with ID %s not found for data source ID %s", mappingID, sourceID)
-	}
-
-	if mapping.SourceFieldName == "" {
-		return DataSourceFieldMapping{}, fmt.Errorf("source field name cannot be empty")
-	}
-
-	existingFm.SourceFieldName = mapping.SourceFieldName
-	existingFm.EntityID = mapping.EntityID // Allow changing entity/attribute target
-	existingFm.AttributeID = mapping.AttributeID
-	existingFm.TransformationRule = mapping.TransformationRule
-	existingFm.UpdatedAt = time.Now().UTC()
-	s.fieldMappings[sourceID][mappingID] = existingFm
-	return existingFm, nil
+	return updatedMapping, nil
 }
 
-// DeleteFieldMapping removes a field mapping from a data source.
-func (s *Store) DeleteFieldMapping(sourceID, mappingID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *PostgresStore) DeleteFieldMapping(sourceID, mappingID string) error {
+	query := `DELETE FROM data_source_field_mappings WHERE source_id = $1 AND id = $2`
+	result, err := s.DB.Exec(query, sourceID, mappingID)
+	if err != nil {
+		return fmt.Errorf("DeleteFieldMapping failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteFieldMapping failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
 
-	if _, ok := s.dataSources[sourceID]; !ok {
-		return fmt.Errorf("data source with ID %s not found", sourceID)
+// --- GroupDefinition Methods ---
+
+func (s *PostgresStore) CreateGroupDefinition(def GroupDefinition) (GroupDefinition, error) {
+	now := time.Now().UTC()
+	if def.ID == "" {
+		def.ID = uuid.NewString()
 	}
-	sourceMappings, ok := s.fieldMappings[sourceID]
-	if !ok {
-		return fmt.Errorf("no field mappings found for data source ID %s", sourceID)
+	def.CreatedAt = now
+	def.UpdatedAt = now
+
+	query := `INSERT INTO group_definitions (id, name, entity_id, rules_json, description, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := s.DB.Exec(query, def.ID, def.Name, def.EntityID, def.RulesJSON, def.Description, def.CreatedAt, def.UpdatedAt)
+	if err != nil {
+		return GroupDefinition{}, fmt.Errorf("CreateGroupDefinition failed: %w", err)
 	}
-	if _, ok := sourceMappings[mappingID]; !ok {
-		return fmt.Errorf("field mapping with ID %s not found for data source ID %s", mappingID, sourceID)
+	return def, nil
+}
+
+func (s *PostgresStore) GetGroupDefinition(id string) (GroupDefinition, error) {
+	var def GroupDefinition
+	query := `SELECT id, name, entity_id, rules_json, description, created_at, updated_at FROM group_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(&def.ID, &def.Name, &def.EntityID, &def.RulesJSON, &def.Description, &def.CreatedAt, &def.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GroupDefinition{}, sql.ErrNoRows
+		}
+		return GroupDefinition{}, fmt.Errorf("GetGroupDefinition failed: %w", err)
 	}
-	delete(s.fieldMappings[sourceID], mappingID)
-	if len(s.fieldMappings[sourceID]) == 0 { // Clean up map if no mappings left for this source
-		delete(s.fieldMappings, sourceID)
+	return def, nil
+}
+
+func (s *PostgresStore) ListGroupDefinitions() ([]GroupDefinition, error) {
+	var defs []GroupDefinition
+	query := `SELECT id, name, entity_id, rules_json, description, created_at, updated_at FROM group_definitions ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("ListGroupDefinitions failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var def GroupDefinition
+		if err := rows.Scan(&def.ID, &def.Name, &def.EntityID, &def.RulesJSON, &def.Description, &def.CreatedAt, &def.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("ListGroupDefinitions row scan failed: %w", err)
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListGroupDefinitions rows iteration error: %w", err)
+	}
+	return defs, nil
+}
+
+func (s *PostgresStore) UpdateGroupDefinition(id string, def GroupDefinition) (GroupDefinition, error) {
+	now := time.Now().UTC()
+	def.UpdatedAt = now
+	def.ID = id
+
+	query := `UPDATE group_definitions 
+              SET name = $1, entity_id = $2, rules_json = $3, description = $4, updated_at = $5 
+              WHERE id = $6
+              RETURNING id, name, entity_id, rules_json, description, created_at, updated_at`
+	var updatedDef GroupDefinition
+	err := s.DB.QueryRow(query, def.Name, def.EntityID, def.RulesJSON, def.Description, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.EntityID, &updatedDef.RulesJSON, &updatedDef.Description, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GroupDefinition{}, sql.ErrNoRows
+		}
+		return GroupDefinition{}, fmt.Errorf("UpdateGroupDefinition failed: %w", err)
+	}
+	return updatedDef, nil
+}
+
+func (s *PostgresStore) DeleteGroupDefinition(id string) error {
+	query := `DELETE FROM group_definitions WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteGroupDefinition failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteGroupDefinition failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// --- WorkflowDefinition Methods ---
+
+func (s *PostgresStore) CreateWorkflowDefinition(def WorkflowDefinition) (WorkflowDefinition, error) {
+	now := time.Now().UTC()
+	if def.ID == "" {
+		def.ID = uuid.NewString()
+	}
+	def.CreatedAt = now
+	def.UpdatedAt = now
+
+	query := `INSERT INTO workflow_definitions 
+              (id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, def.CreatedAt, def.UpdatedAt)
+	if err != nil {
+		return WorkflowDefinition{}, fmt.Errorf("CreateWorkflowDefinition failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) GetWorkflowDefinition(id string) (WorkflowDefinition, error) {
+	var def WorkflowDefinition
+	query := `SELECT id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at 
+              FROM workflow_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(
+		&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, &def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return WorkflowDefinition{}, sql.ErrNoRows
+		}
+		return WorkflowDefinition{}, fmt.Errorf("GetWorkflowDefinition failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) ListWorkflowDefinitions() ([]WorkflowDefinition, error) {
+	var defs []WorkflowDefinition
+	query := `SELECT id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at 
+              FROM workflow_definitions ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("ListWorkflowDefinitions failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var def WorkflowDefinition
+		if err := rows.Scan(
+			&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, &def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("ListWorkflowDefinitions row scan failed: %w", err)
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListWorkflowDefinitions rows iteration error: %w", err)
+	}
+	return defs, nil
+}
+
+func (s *PostgresStore) UpdateWorkflowDefinition(id string, def WorkflowDefinition) (WorkflowDefinition, error) {
+	now := time.Now().UTC()
+	def.UpdatedAt = now
+	def.ID = id
+
+	query := `UPDATE workflow_definitions 
+              SET name = $1, description = $2, trigger_type = $3, trigger_config = $4, action_sequence_json = $5, is_enabled = $6, updated_at = $7 
+              WHERE id = $8
+              RETURNING id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at`
+	var updatedDef WorkflowDefinition
+	err := s.DB.QueryRow(query, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.TriggerType, &updatedDef.TriggerConfig, &updatedDef.ActionSequenceJSON, &updatedDef.IsEnabled, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return WorkflowDefinition{}, sql.ErrNoRows
+		}
+		return WorkflowDefinition{}, fmt.Errorf("UpdateWorkflowDefinition failed: %w", err)
+	}
+	return updatedDef, nil
+}
+
+func (s *PostgresStore) DeleteWorkflowDefinition(id string) error {
+	query := `DELETE FROM workflow_definitions WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteWorkflowDefinition failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteWorkflowDefinition failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// --- ActionTemplate Methods ---
+
+func (s *PostgresStore) CreateActionTemplate(tmpl ActionTemplate) (ActionTemplate, error) {
+	now := time.Now().UTC()
+	if tmpl.ID == "" {
+		tmpl.ID = uuid.NewString()
+	}
+	tmpl.CreatedAt = now
+	tmpl.UpdatedAt = now
+
+	query := `INSERT INTO action_templates (id, name, description, action_type, template_content, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := s.DB.Exec(query, tmpl.ID, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, tmpl.CreatedAt, tmpl.UpdatedAt)
+	if err != nil {
+		return ActionTemplate{}, fmt.Errorf("CreateActionTemplate failed: %w", err)
+	}
+	return tmpl, nil
+}
+
+func (s *PostgresStore) GetActionTemplate(id string) (ActionTemplate, error) {
+	var tmpl ActionTemplate
+	query := `SELECT id, name, description, action_type, template_content, created_at, updated_at FROM action_templates WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(
+		&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, &tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ActionTemplate{}, sql.ErrNoRows
+		}
+		return ActionTemplate{}, fmt.Errorf("GetActionTemplate failed: %w", err)
+	}
+	return tmpl, nil
+}
+
+func (s *PostgresStore) ListActionTemplates() ([]ActionTemplate, error) {
+	var tmpls []ActionTemplate
+	query := `SELECT id, name, description, action_type, template_content, created_at, updated_at FROM action_templates ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("ListActionTemplates failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tmpl ActionTemplate
+		if err := rows.Scan(
+			&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, &tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("ListActionTemplates row scan failed: %w", err)
+		}
+		tmpls = append(tmpls, tmpl)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListActionTemplates rows iteration error: %w", err)
+	}
+	return tmpls, nil
+}
+
+func (s *PostgresStore) UpdateActionTemplate(id string, tmpl ActionTemplate) (ActionTemplate, error) {
+	now := time.Now().UTC()
+	tmpl.UpdatedAt = now
+	tmpl.ID = id
+
+	query := `UPDATE action_templates 
+              SET name = $1, description = $2, action_type = $3, template_content = $4, updated_at = $5 
+              WHERE id = $6
+              RETURNING id, name, description, action_type, template_content, created_at, updated_at`
+	var updatedTmpl ActionTemplate
+	err := s.DB.QueryRow(query, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, tmpl.UpdatedAt, tmpl.ID).Scan(
+		&updatedTmpl.ID, &updatedTmpl.Name, &updatedTmpl.Description, &updatedTmpl.ActionType, &updatedTmpl.TemplateContent, &updatedTmpl.CreatedAt, &updatedTmpl.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ActionTemplate{}, sql.ErrNoRows
+		}
+		return ActionTemplate{}, fmt.Errorf("UpdateActionTemplate failed: %w", err)
+	}
+	return updatedTmpl, nil
+}
+
+func (s *PostgresStore) DeleteActionTemplate(id string) error {
+	query := `DELETE FROM action_templates WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteActionTemplate failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteActionTemplate failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// Interface assertion (optional, but good for ensuring correctness)
+// var _ Store = (*PostgresStore)(nil)
+// The above line would require the Store interface to be defined in this file or package.
+// For now, we assume the interface matches the methods implemented.
+// The actual `Store` interface is defined in `api.go`, so this check can't be done here directly
+// without causing import cycles or refactoring interface definition location.
+// It will be implicitly checked at compile time if `PostgresStore` is used where `Store` is expected.
+
+func (s *PostgresStore) Close() error {
+	if s.DB != nil {
+		return s.DB.Close()
 	}
 	return nil
 }
