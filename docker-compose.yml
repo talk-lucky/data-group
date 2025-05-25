@@ -168,3 +168,20 @@ services:
       nats:
         condition: service_started
     restart: unless-stopped
+
+  scheduler-service:
+    build:
+      context: ./backend/scheduler
+      dockerfile: Dockerfile
+    environment:
+      # SCHEDULER_SERVICE_PORT: 8085 # Not currently used by the service
+      METADATA_SERVICE_URL: http://api-gateway:8080
+      INGESTION_SERVICE_URL: http://ingestion-service:8081
+      # GROUPING_SERVICE_URL: http://grouping-service:8083 # Add if scheduler directly calls grouping
+      # ORCHESTRATION_SERVICE_URL: http://orchestration-service:8084 # Add if scheduler directly calls orchestration
+    depends_on:
+      - api-gateway # For METADATA_SERVICE_URL
+      - ingestion-service # For INGESTION_SERVICE_URL
+      # - grouping-service # Add if used
+      # - orchestration-service # Add if used
+    restart: unless-stopped

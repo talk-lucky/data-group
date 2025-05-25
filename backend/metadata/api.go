@@ -62,11 +62,11 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 	}
 
 	// Group Definition Routes
-	groupDefinitionRoutes := v1.Group("/groups")
+	groupDefinitionRoutes := v1.Group("/group-definitions") // Renamed from /groups
 	{
 		groupDefinitionRoutes.POST("/", a.createGroupDefinitionHandler)
 		groupDefinitionRoutes.GET("/", a.listGroupDefinitionsHandler)
-		groupDefinitionRoutes.GET("/:group_id", a.getGroupDefinitionHandler)
+		groupDefinitionRoutes.GET("/:group_id", a.getGroupDefinitionHandler) // group_id param name is fine
 		groupDefinitionRoutes.PUT("/:group_id", a.updateGroupDefinitionHandler)
 		groupDefinitionRoutes.DELETE("/:group_id", a.deleteGroupDefinitionHandler)
 	}
@@ -89,6 +89,16 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 		actionTemplateRoutes.GET("/:template_id", a.getActionTemplateHandler)
 		actionTemplateRoutes.PUT("/:template_id", a.updateActionTemplateHandler)
 		actionTemplateRoutes.DELETE("/:template_id", a.deleteActionTemplateHandler)
+	}
+
+	// Schedule Definition Routes
+	scheduleRoutes := v1.Group("/schedules")
+	{
+		scheduleRoutes.POST("/", a.createScheduleDefinitionHandler)
+		scheduleRoutes.GET("/", a.listScheduleDefinitionsHandler)
+		scheduleRoutes.GET("/:schedule_id", a.getScheduleDefinitionHandler)
+		scheduleRoutes.PUT("/:schedule_id", a.updateScheduleDefinitionHandler)
+		scheduleRoutes.DELETE("/:schedule_id", a.deleteScheduleDefinitionHandler)
 	}
 }
 
@@ -156,6 +166,76 @@ func (a *API) deleteEntityHandler(c *gin.Context) {
 	err := a.store.DeleteEntity(entityID)
 	if err != nil {
 		handleStoreError(c, err, "Entity")
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
+}
+
+
+// --- ScheduleDefinition Handlers ---
+
+func (a *API) createScheduleDefinitionHandler(c *gin.Context) {
+	var req ScheduleDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	// ID, CreatedAt, UpdatedAt are set by the store
+	req.ID = "" 
+
+	schedule, err := a.store.CreateScheduleDefinition(req)
+	if err != nil {
+		// More specific error handling can be added if store returns typed errors
+		if strings.Contains(err.Error(), "unique constraint") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Failed to create schedule: " + err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create schedule: " + err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, schedule)
+}
+
+func (a *API) listScheduleDefinitionsHandler(c *gin.Context) {
+	schedules, err := a.store.ListScheduleDefinitions()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list schedules: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, schedules)
+}
+
+func (a *API) getScheduleDefinitionHandler(c *gin.Context) {
+	scheduleID := c.Param("schedule_id")
+	schedule, err := a.store.GetScheduleDefinition(scheduleID)
+	if err != nil {
+		handleStoreError(c, err, "Schedule")
+		return
+	}
+	c.JSON(http.StatusOK, schedule)
+}
+
+func (a *API) updateScheduleDefinitionHandler(c *gin.Context) {
+	scheduleID := c.Param("schedule_id")
+	var req ScheduleDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+
+	schedule, err := a.store.UpdateScheduleDefinition(scheduleID, req)
+	if err != nil {
+		handleStoreError(c, err, "Schedule")
+		return
+	}
+	c.JSON(http.StatusOK, schedule)
+}
+
+func (a *API) deleteScheduleDefinitionHandler(c *gin.Context) {
+	scheduleID := c.Param("schedule_id")
+	err := a.store.DeleteScheduleDefinition(scheduleID)
+	if err != nil {
+		handleStoreError(c, err, "Schedule")
 		return
 	}
 	c.JSON(http.StatusNoContent, nil)

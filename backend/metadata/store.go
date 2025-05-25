@@ -134,6 +134,21 @@ func (s *PostgresStore) initSchema() error {
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_action_templates_name ON action_templates(name)`,
+
+		`CREATE TABLE IF NOT EXISTS schedule_definitions (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			cron_expression TEXT NOT NULL,
+			task_type TEXT NOT NULL,
+			task_parameters JSONB NOT NULL,
+			is_enabled BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sd_name ON schedule_definitions(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_sd_task_type ON schedule_definitions(task_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_sd_is_enabled ON schedule_definitions(is_enabled)`,
 	}
 
 	for _, stmt := range schemaStatements {
@@ -228,6 +243,104 @@ func (s *PostgresStore) DeleteEntity(id string) error {
 	}
 	if rowsAffected == 0 {
 		return sql.ErrNoRows // Or a custom "not found" error
+	}
+	return nil
+}
+
+
+// --- ScheduleDefinition Methods ---
+
+func (s *PostgresStore) CreateScheduleDefinition(def ScheduleDefinition) (ScheduleDefinition, error) {
+	now := time.Now().UTC()
+	if def.ID == "" {
+		def.ID = uuid.NewString()
+	}
+	def.CreatedAt = now
+	def.UpdatedAt = now
+
+	query := `INSERT INTO schedule_definitions 
+              (id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, def.CreatedAt, def.UpdatedAt)
+	if err != nil {
+		return ScheduleDefinition{}, fmt.Errorf("CreateScheduleDefinition failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) GetScheduleDefinition(id string) (ScheduleDefinition, error) {
+	var def ScheduleDefinition
+	query := `SELECT id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at 
+              FROM schedule_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(
+		&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, &def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ScheduleDefinition{}, sql.ErrNoRows
+		}
+		return ScheduleDefinition{}, fmt.Errorf("GetScheduleDefinition failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) ListScheduleDefinitions() ([]ScheduleDefinition, error) {
+	var defs []ScheduleDefinition
+	query := `SELECT id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at 
+              FROM schedule_definitions ORDER BY name`
+	rows, err := s.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("ListScheduleDefinitions failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var def ScheduleDefinition
+		if err := rows.Scan(
+			&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, &def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("ListScheduleDefinitions row scan failed: %w", err)
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListScheduleDefinitions rows iteration error: %w", err)
+	}
+	return defs, nil
+}
+
+func (s *PostgresStore) UpdateScheduleDefinition(id string, def ScheduleDefinition) (ScheduleDefinition, error) {
+	now := time.Now().UTC()
+	def.UpdatedAt = now
+	def.ID = id // Ensure ID is the one from path param, not from payload if they differ
+
+	query := `UPDATE schedule_definitions 
+              SET name = $1, description = $2, cron_expression = $3, task_type = $4, task_parameters = $5, is_enabled = $6, updated_at = $7 
+              WHERE id = $8
+              RETURNING id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at`
+	var updatedDef ScheduleDefinition
+	err := s.DB.QueryRow(query, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.CronExpression, &updatedDef.TaskType, &updatedDef.TaskParameters, &updatedDef.IsEnabled, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ScheduleDefinition{}, sql.ErrNoRows
+		}
+		return ScheduleDefinition{}, fmt.Errorf("UpdateScheduleDefinition failed: %w", err)
+	}
+	return updatedDef, nil
+}
+
+func (s *PostgresStore) DeleteScheduleDefinition(id string) error {
+	query := `DELETE FROM schedule_definitions WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteScheduleDefinition failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteScheduleDefinition failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }

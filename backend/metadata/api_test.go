@@ -67,6 +67,11 @@ func clearAllTables(store *PostgresStore) error {
 		"workflow_definitions",
 		"group_definitions",
 		"data_source_field_mappings",
+		"schedule_definitions", // Added schedule_definitions
+		"action_templates",
+		"workflow_definitions",
+		"group_definitions",
+		"data_source_field_mappings",
 		"data_source_configs",
 		"attribute_definitions",
 		"entity_definitions",
@@ -618,5 +623,140 @@ func TestDeleteFieldMappingHandler(t *testing.T) {
 	// Test non-existent source_id
 	urlNonExistentSource := fmt.Sprintf("/api/v1/datasources/nonexistent-source-id/mappings/%s", fm.ID)
 	w = performRequest(testRouter, "DELETE", urlNonExistentSource, nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// --- ScheduleDefinition Handler Tests (New) ---
+
+func TestCreateScheduleDefinitionHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	// Test successful creation
+	validPayload := `{"name": "Daily Ingest", "description": "Ingests data daily", "cron_expression": "0 0 * * *", "task_type": "ingest_data_source", "task_parameters": "{\"source_id\":\"uuid-for-source\"}", "is_enabled": true}`
+	w := performRequest(testRouter, "POST", "/api/v1/schedules/", strings.NewReader(validPayload), nil)
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var createdSchedule ScheduleDefinition
+	err := json.Unmarshal(w.Body.Bytes(), &createdSchedule)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, createdSchedule.ID)
+	assert.Equal(t, "Daily Ingest", createdSchedule.Name)
+	assert.Equal(t, "0 0 * * *", createdSchedule.CronExpression)
+	assert.Equal(t, "ingest_data_source", createdSchedule.TaskType)
+	assert.Equal(t, `{"source_id":"uuid-for-source"}`, createdSchedule.TaskParameters) // Stored as string
+	assert.True(t, createdSchedule.IsEnabled)
+	assert.WithinDuration(t, time.Now(), createdSchedule.CreatedAt, 2*time.Second)
+
+	// Test missing required fields
+	missingFieldsTests := []struct {
+		name    string
+		payload string
+		field   string
+	}{
+		{"Missing Name", `{"description": "Test", "cron_expression": "0 0 * * *", "task_type": "type", "task_parameters": "{}"}`, "name"},
+		{"Missing CronExpression", `{"name": "Test", "description": "Test", "task_type": "type", "task_parameters": "{}"}`, "cron_expression"},
+		{"Missing TaskType", `{"name": "Test", "description": "Test", "cron_expression": "0 0 * * *", "task_parameters": "{}"}`, "task_type"},
+		{"Missing TaskParameters", `{"name": "Test", "description": "Test", "cron_expression": "0 0 * * *", "task_type": "type"}`, "task_parameters"},
+	}
+
+	for _, tt := range missingFieldsTests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := performRequest(testRouter, "POST", "/api/v1/schedules/", strings.NewReader(tt.payload), nil)
+			assert.Equal(t, http.StatusBadRequest, w.Code, "Expected BadRequest for missing "+tt.field)
+			var errorResponse map[string]string
+			err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+			assert.NoError(t, err)
+			assert.Contains(t, errorResponse["error"], tt.field) // Gin binding error messages usually mention the field
+		})
+	}
+}
+
+func TestListScheduleDefinitionsHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	// Test empty list
+	w := performRequest(testRouter, "GET", "/api/v1/schedules/", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var schedules []ScheduleDefinition
+	err := json.Unmarshal(w.Body.Bytes(), &schedules)
+	assert.NoError(t, err)
+	assert.Len(t, schedules, 0)
+
+	// Create some schedules directly via store for setup
+	_, _ = testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Schedule A", CronExpression: "0 * * * *", TaskType: "typeA", TaskParameters: "{}"})
+	_, _ = testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Schedule B", CronExpression: "30 * * * *", TaskType: "typeB", TaskParameters: "{}"})
+
+	w = performRequest(testRouter, "GET", "/api/v1/schedules/", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &schedules)
+	assert.NoError(t, err)
+	assert.Len(t, schedules, 2)
+}
+
+func TestGetScheduleDefinitionHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	createdSchedule, err := testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "My Schedule", CronExpression: "15 * * * *", TaskType: "myTask", TaskParameters: `{"key":"val"}`})
+	require.NoError(t, err)
+
+	// Test successful retrieval
+	w := performRequest(testRouter, "GET", "/api/v1/schedules/"+createdSchedule.ID, nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var fetchedSchedule ScheduleDefinition
+	err = json.Unmarshal(w.Body.Bytes(), &fetchedSchedule)
+	assert.NoError(t, err)
+	assert.Equal(t, createdSchedule.ID, fetchedSchedule.ID)
+	assert.Equal(t, "My Schedule", fetchedSchedule.Name)
+	assert.Equal(t, `{"key":"val"}`, fetchedSchedule.TaskParameters)
+
+	// Test retrieval of non-existent schedule
+	w = performRequest(testRouter, "GET", "/api/v1/schedules/nonexistent-id", nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestUpdateScheduleDefinitionHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+	createdSchedule, err := testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Old Name", CronExpression: "0 0 * * *", TaskType: "old_type", TaskParameters: `{"old_param":"old_val"}`, IsEnabled: false})
+	require.NoError(t, err)
+
+	// Test successful update
+	updatePayload := `{"name": "New Name", "description": "Updated desc", "cron_expression": "0 1 * * *", "task_type": "new_type", "task_parameters": "{\"new_param\":\"new_val\"}", "is_enabled": true}`
+	w := performRequest(testRouter, "PUT", "/api/v1/schedules/"+createdSchedule.ID, strings.NewReader(updatePayload), nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var updatedSchedule ScheduleDefinition
+	err = json.Unmarshal(w.Body.Bytes(), &updatedSchedule)
+	assert.NoError(t, err)
+	assert.Equal(t, "New Name", updatedSchedule.Name)
+	assert.Equal(t, "Updated desc", updatedSchedule.Description)
+	assert.Equal(t, "0 1 * * *", updatedSchedule.CronExpression)
+	assert.Equal(t, "new_type", updatedSchedule.TaskType)
+	assert.Equal(t, `{"new_param":"new_val"}`, updatedSchedule.TaskParameters)
+	assert.True(t, updatedSchedule.IsEnabled)
+	assert.True(t, updatedSchedule.UpdatedAt.After(createdSchedule.UpdatedAt))
+
+	// Test update with non-existent ID
+	w = performRequest(testRouter, "PUT", "/api/v1/schedules/nonexistent-id", strings.NewReader(updatePayload), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Test update with missing required field (e.g., Name)
+	invalidUpdatePayload := `{"description": "Only Desc", "cron_expression": "0 2 * * *"}`
+	w = performRequest(testRouter, "PUT", "/api/v1/schedules/"+createdSchedule.ID, strings.NewReader(invalidUpdatePayload), nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code) // Name is required by struct binding
+}
+
+func TestDeleteScheduleDefinitionHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+	createdSchedule, err := testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "To Be Deleted", CronExpression: "* * * * *", TaskType: "delete_me", TaskParameters: "{}"})
+	require.NoError(t, err)
+
+	// Test successful deletion
+	w := performRequest(testRouter, "DELETE", "/api/v1/schedules/"+createdSchedule.ID, nil, nil)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// Verify it's gone
+	w = performRequest(testRouter, "GET", "/api/v1/schedules/"+createdSchedule.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Test deletion with non-existent ID
+	w = performRequest(testRouter, "DELETE", "/api/v1/schedules/nonexistent-id", nil, nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }

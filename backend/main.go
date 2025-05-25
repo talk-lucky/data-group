@@ -166,11 +166,23 @@ func main() {
 	gatewayRouter.Use(gin.Recovery())
 
 	// --- Setup Gateway Routes ---
-	// Metadata Service: /api/v1/metadata/*any -> http://localhost:8090/*any (stripping prefix)
-	gatewayRouter.Any("/api/v1/metadata/*any", proxyTo("http://"+metadataInternalAddr, "/api/v1/metadata", nil))
+	// --- Setup Gateway Routes ---
+	metadataTarget := "http://" + metadataInternalAddr
 
-	// Ingest Service: /api/v1/ingest/*any -> http://localhost:8081/api/v1/ingest/*any (no stripping, target handles full path)
-	ingestTargetURL := getEnv("INGEST_SERVICE_URL", "http://localhost:8081") // Example if ingest was also env configured
+	// Standardized Metadata Service Routes:
+	// These routes proxy directly to the internal metadata service,
+	// and the internal metadata service's router handles the full /api/v1/... path.
+	// The `prefixToStrip` is empty, meaning the gateway path is sent as-is to the target.
+	gatewayRouter.Any("/api/v1/entities/*any", proxyTo(metadataTarget, "", nil))
+	gatewayRouter.Any("/api/v1/datasources/*any", proxyTo(metadataTarget, "", nil)) // Covers nested /mappings
+	gatewayRouter.Any("/api/v1/group-definitions/*any", proxyTo(metadataTarget, "", nil)) // New route for metadata GroupDefinitions
+	gatewayRouter.Any("/api/v1/workflows/*any", proxyTo(metadataTarget, "", nil))
+	gatewayRouter.Any("/api/v1/actiontemplates/*any", proxyTo(metadataTarget, "", nil))
+	gatewayRouter.Any("/api/v1/schedules/*any", proxyTo(metadataTarget, "", nil))
+
+
+	// Ingest Service: /api/v1/ingest/*any -> http://localhost:8081 (target handles full path)
+	ingestTargetURL := getEnv("INGEST_SERVICE_URL", "http://localhost:8081") 
 	gatewayRouter.Any("/api/v1/ingest/*any", proxyTo(ingestTargetURL, "", nil))
 
 	// Processing Service: /api/v1/processing/*any -> http://localhost:8082/api/v1/process/*any (path prefix replacement)
@@ -178,11 +190,12 @@ func main() {
 	processingPathReplace := map[string]string{"/api/v1/processing": "/api/v1/process"}
 	gatewayRouter.Any("/api/v1/processing/*any", proxyTo(processingTargetURL, "", processingPathReplace))
 
-	// Groups Service: /api/v1/groups/*any -> http://localhost:8083/api/v1/groups/*any (no stripping)
-	groupsTargetURL := getEnv("GROUPS_SERVICE_URL", "http://localhost:8083")
-	gatewayRouter.Any("/api/v1/groups/*any", proxyTo(groupsTargetURL, "", nil))
+	// Grouping Service (for group calculations and results - path remains /api/v1/groups): 
+	// /api/v1/groups/*any -> http://localhost:8083 (target handles full path)
+	groupsCalculationTargetURL := getEnv("GROUPS_SERVICE_URL", "http://localhost:8083")
+	gatewayRouter.Any("/api/v1/groups/*any", proxyTo(groupsCalculationTargetURL, "", nil))
 
-	// Orchestration Service: /api/v1/orchestration/*any -> http://localhost:8084/api/v1/orchestration/*any (no stripping)
+	// Orchestration Service: /api/v1/orchestration/*any -> http://localhost:8084 (target handles full path)
 	orchestrationTargetURL := getEnv("ORCHESTRATION_SERVICE_URL", "http://localhost:8084")
 	gatewayRouter.Any("/api/v1/orchestration/*any", proxyTo(orchestrationTargetURL, "", nil))
 	

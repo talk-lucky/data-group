@@ -11,6 +11,19 @@ type EntityDefinition struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// ScheduleDefinition defines the structure for a scheduled task.
+type ScheduleDefinition struct {
+	ID                string    `json:"id"`
+	Name              string    `json:"name" binding:"required"`
+	Description       string    `json:"description,omitempty"`
+	CronExpression    string    `json:"cron_expression" binding:"required"`
+	TaskType          string    `json:"task_type" binding:"required"` // e.g., "ingest_data_source", "calculate_group", "trigger_workflow"
+	TaskParameters    string    `json:"task_parameters" binding:"required"` // JSON string, e.g., {"source_id": "uuid"}
+	IsEnabled         bool      `json:"is_enabled"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
 // WorkflowDefinition defines the structure for a workflow.
 type WorkflowDefinition struct {
 	ID                  string    `json:"id"`

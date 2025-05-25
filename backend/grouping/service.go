@@ -58,7 +58,7 @@ func (c *HTTPMetadataClient) fetchMetadata(url string, target interface{}) error
 }
 func (c *HTTPMetadataClient) GetGroupDefinition(groupID string) (*GroupDefinition, error) {
 	var groupDef GroupDefinition
-	url := fmt.Sprintf("%s/api/v1/groups/%s", c.BaseURL, groupID)
+	url := fmt.Sprintf("%s/api/v1/group-definitions/%s", c.BaseURL, groupID) // Updated path
 	err := c.fetchMetadata(url, &groupDef)
 	return &groupDef, err
 }
