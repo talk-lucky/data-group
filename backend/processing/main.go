@@ -11,14 +11,128 @@ import (
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
+// getEnv reads an environment variable or returns a default value.
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	log.Printf("Environment variable %s not set, using default: %s", key, fallback)
+	return fallback
+}
+
+// --- Placeholder types and functions (assuming these are defined elsewhere or are simplified for this context) ---
+
+// ProcessingService orchestrates data processing.
+type ProcessingService struct {
+	metadataClient MetadataServiceClient
+	db             *sql.DB // Database connection for storing processed data
+}
+
+// NewProcessingService creates a new ProcessingService.
+func NewProcessingService(metadataClient MetadataServiceClient, db *sql.DB) *ProcessingService {
+	return &ProcessingService{
+		metadataClient: metadataClient,
+		db:             db,
+	}
+}
+
+// ProcessDataRequest is the expected input for the processing endpoint.
+type ProcessDataRequest struct {
+	SourceID       string                   `json:"source_id"`
+	EntityTypeName string                   `json:"entity_type_name,omitempty"` // Optional: if not provided, try to derive from SourceID
+	RawData        []map[string]interface{} `json:"raw_data"`
+}
+
+// MetadataServiceClient defines the interface for interacting with the metadata service.
+type MetadataServiceClient interface {
+	GetDataSourceConfig(sourceID string) (*DataSourceConfig, error)
+	GetEntityDefinition(entityID string) (*EntityDefinition, error)
+	// Add other methods as needed, e.g., GetAttributeDefinitions(entityID string)
+}
+
+// HTTPMetadataClient is an HTTP implementation of MetadataServiceClient.
+type HTTPMetadataClient struct {
+	baseURL string
+}
+
+// NewHTTPMetadataClient creates a new HTTPMetadataClient.
+func NewHTTPMetadataClient(baseURL string) *HTTPMetadataClient {
+	log.Printf("Initializing HTTPMetadataClient for Processing Service with baseURL: %s", baseURL)
+	return &HTTPMetadataClient{baseURL: baseURL}
+}
+
+// DataSourceConfig represents the configuration for a data source. (Simplified)
+type DataSourceConfig struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	EntityID string `json:"entity_id,omitempty"` // Associated EntityDefinition ID
+}
+
+// EntityDefinition represents a metadata entity. (Simplified)
+type EntityDefinition struct {
+	ID   string `json:"id"`
+	Name string `json:"name"` // This would be the EntityTypeName
+}
+
+// GetDataSourceConfig simulates fetching DataSourceConfig from metadata service.
+func (c *HTTPMetadataClient) GetDataSourceConfig(sourceID string) (*DataSourceConfig, error) {
+	// In a real scenario, this would make an HTTP GET request to:
+	// fmt.Sprintf("%s/api/v1/metadata/datasources/%s", c.baseURL, sourceID)
+	log.Printf("HTTPMetadataClient: Mock fetching DataSourceConfig for SourceID: %s from %s", sourceID, c.baseURL)
+	if sourceID == "known_source_with_entity" {
+		return &DataSourceConfig{ID: sourceID, Name: "Known Source", EntityID: "entity123"}, nil
+	}
+	if sourceID == "known_source_no_entity" {
+		return &DataSourceConfig{ID: sourceID, Name: "Known Source No Entity", EntityID: ""}, nil
+	}
+	return nil, fmt.Errorf("mock metadata service error: data source config for %s not found", sourceID)
+}
+
+// GetEntityDefinition simulates fetching EntityDefinition from metadata service.
+func (c *HTTPMetadataClient) GetEntityDefinition(entityID string) (*EntityDefinition, error) {
+	// In a real scenario, this would make an HTTP GET request to:
+	// fmt.Sprintf("%s/api/v1/metadata/entities/%s", c.baseURL, entityID)
+	log.Printf("HTTPMetadataClient: Mock fetching EntityDefinition for EntityID: %s from %s", entityID, c.baseURL)
+	if entityID == "entity123" {
+		return &EntityDefinition{ID: entityID, Name: "Order"}, nil
+	}
+	return nil, fmt.Errorf("mock metadata service error: entity definition for %s not found", entityID)
+}
+
+// ProcessAndStoreData is a placeholder for the actual data processing and storage logic.
+func (s *ProcessingService) ProcessAndStoreData(sourceID, entityTypeName string, rawData []map[string]interface{}) (int, error) {
+	log.Printf("ProcessingService: Processing %d records for SourceID '%s', EntityType '%s'", len(rawData), sourceID, entityTypeName)
+	// 1. Fetch attribute definitions for entityTypeName from metadata service
+	// 2. For each record in rawData:
+	//    a. Validate and transform based on attribute definitions
+	//    b. Store in the appropriate table in 's.db' (e.g., a table named after entityTypeName)
+	// This is a highly simplified placeholder.
+	// For now, just log and return the count of records.
+	for i, record := range rawData {
+		log.Printf("Processing record %d for %s: %v (actual storage not implemented)", i+1, sourceID, record)
+		// Example: _, err := s.db.Exec(fmt.Sprintf("INSERT INTO %s_data (...) VALUES (...)", entityTypeName), ...record fields...)
+		// if err != nil { return 0, err }
+	}
+	return len(rawData), nil
+}
+
+// --- Main Application ---
 func main() {
-	// --- Database Connection ---
-	// Read DB connection details from environment variables or use defaults
+	// --- Configuration ---
+	metadataServiceURL := getEnv("METADATA_SERVICE_URL", "http://localhost:8090") // Updated default
+	processingServicePort := getEnv("PROCESSING_SERVICE_PORT", "8082")
+
+	log.Printf("Configuration:")
+	log.Printf("  METADATA_SERVICE_URL: %s", metadataServiceURL)
+	log.Printf("  PROCESSING_SERVICE_PORT: %s", processingServicePort)
+
+
+	// --- Database Connection (remains the same) ---
 	dbHost := getEnv("DB_HOST", "localhost")
 	dbPort := getEnv("DB_PORT", "5432")
-	dbUser := getEnv("DB_USER", "admin") // Default user
-	dbPassword := getEnv("DB_PASSWORD", "password") // Default password
-	dbName := getEnv("DB_NAME", "metadata_db")    // Default database name
+	dbUser := getEnv("DB_USER", "admin")
+	dbPassword := getEnv("DB_PASSWORD", "password")
+	dbName := getEnv("DB_NAME", "metadata_db")
 	dbSSLMode := getEnv("DB_SSLMODE", "disable")
 
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
@@ -37,25 +151,32 @@ func main() {
 	log.Println("Successfully connected to the database for processing service.")
 
 	// --- Initialize Services ---
-	// Metadata service client (assuming it runs on localhost:8080)
-	// This URL should ideally come from configuration.
-	metadataServiceURL := getEnv("METADATA_SERVICE_URL", "http://localhost:8080")
 	metadataClient := NewHTTPMetadataClient(metadataServiceURL)
-
 	processingSvc := NewProcessingService(metadataClient, db)
 
 	// --- HTTP Server Setup ---
 	router := gin.Default()
 
-	v1 := router.Group("/api/v1")
+	// The gateway is expected to rewrite /api/v1/processing/* to /api/v1/process/*
+	// So this service should listen on /api/v1/process
+	apiV1 := router.Group("/api/v1")
 	{
-		v1.POST("/process", processDataHandler(processingSvc))
+		processRoutes := apiV1.Group("/process")
+		{
+			processRoutes.POST("", processDataHandler(processingSvc)) // Changed from /process to "" as group is /process
+		}
 	}
+	
+	// Health check endpoint
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "UP"})
+	})
 
-	// Start the server on port 8082
-	serverPort := ":8082"
-	log.Printf("Starting Data Processing Service on port %s", serverPort)
-	if err := router.Run(serverPort); err != nil {
+
+	// Start the server
+	listenAddr := fmt.Sprintf(":%s", processingServicePort)
+	log.Printf("Starting Data Processing Service on %s", listenAddr)
+	if err := router.Run(listenAddr); err != nil {
 		log.Fatalf("Failed to start Data Processing Service: %v", err)
 	}
 }
@@ -74,8 +195,9 @@ func processDataHandler(service *ProcessingService) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "source_id is required"})
 			return
 		}
+		
+		// Deriving EntityTypeName if not provided
 		if req.EntityTypeName == "" {
-			// Attempt to fetch EntityTypeName from DataSourceConfig if not provided
 			log.Printf("EntityTypeName not provided in request for SourceID %s, attempting to fetch from DataSourceConfig's EntityID", req.SourceID)
 			dsConfig, err := service.metadataClient.GetDataSourceConfig(req.SourceID)
 			if err != nil {
@@ -97,6 +219,7 @@ func processDataHandler(service *ProcessingService) gin.HandlerFunc {
 			req.EntityTypeName = entityDef.Name
 			log.Printf("Successfully derived EntityTypeName '%s' for SourceID %s from DataSourceConfig.EntityID %s", req.EntityTypeName, req.SourceID, dsConfig.EntityID)
 		}
+
 
 		if len(req.RawData) == 0 {
 			log.Printf("No raw data provided in process request for SourceID: %s", req.SourceID)
@@ -127,12 +250,4 @@ func processDataHandler(service *ProcessingService) gin.HandlerFunc {
 			"records_processed":  processedCount,
 		})
 	}
-}
-
-// getEnv reads an environment variable or returns a default value.
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
 }

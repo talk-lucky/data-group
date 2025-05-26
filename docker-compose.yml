@@ -1,0 +1,187 @@
+version: '3.8'
+
+volumes:
+  postgres_data:
+    driver: local
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: metadata_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d metadata_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.9-alpine
+    ports:
+      - "4222:4222" # Client port
+      - "8222:8222" # HTTP monitoring port
+      - "6222:6222" # Routing port for clustering
+    command: nats-server --jetstream --http_port 8222
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile # This is backend/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      API_GATEWAY_PORT: 8080 # Port the gateway listens on internally
+      # METADATA_SERVICE_INTERNAL_PORT: 8090 # This is an internal detail, main.go uses this directly
+      METADATA_DB_HOST: postgres
+      METADATA_DB_PORT: 5432
+      METADATA_DB_USER: admin
+      METADATA_DB_PASSWORD: password
+      METADATA_DB_NAME: metadata_db
+      METADATA_DB_SSLMODE: disable
+      INGESTION_SERVICE_URL: http://ingestion-service:8081
+      PROCESSING_SERVICE_URL: http://processing-service:8082
+      GROUPING_SERVICE_URL: http://grouping-service:8083
+      ORCHESTRATION_SERVICE_URL: http://orchestration-service:8084
+    depends_on:
+      postgres:
+        condition: service_healthy # Wait for postgres to be healthy
+      # Other services are dependencies in terms of runtime communication, 
+      # but api-gateway can start before them. Actual requests will fail if services are not up.
+      # For a more robust startup, each proxied service could have a healthcheck.
+      # ingestion-service:
+      #   condition: service_started 
+      # processing-service:
+      #   condition: service_started
+      # grouping-service:
+      #   condition: service_started
+      # orchestration-service:
+      #   condition: service_started
+    restart: unless-stopped
+
+  ingestion-service:
+    build:
+      context: ./backend/ingestion
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081" # External port mapping
+    environment:
+      INGESTION_SERVICE_PORT: 8081 # Port the service listens on internally
+      METADATA_SERVICE_URL: http://api-gateway:8090 # Metadata service runs within api-gateway on port 8090
+      PROCESSING_SERVICE_URL: http://processing-service:8082
+    volumes:
+      - ./sample_data:/app/csv_data_mount
+    depends_on:
+      - api-gateway # Depends on api-gateway as it hosts the metadata service
+      - processing-service
+    restart: unless-stopped
+
+  processing-service:
+    build:
+      context: ./backend/processing
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082" # External port mapping
+    environment:
+      PROCESSING_SERVICE_PORT: 8082 # Port the service listens on internally
+      METADATA_SERVICE_URL: http://api-gateway:8090 # Metadata service runs within api-gateway on port 8090
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: password
+      DB_NAME: metadata_db
+      DB_SSLMODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api-gateway: # Depends on api-gateway as it hosts the metadata service
+        condition: service_started # Assuming api-gateway starts its internal metadata service quickly
+    restart: unless-stopped
+
+  grouping-service:
+    build:
+      context: ./backend/grouping
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083" # External port mapping
+    environment:
+      GROUPING_SERVICE_PORT: 8083 # Port the service listens on internally
+      METADATA_SERVICE_URL: http://api-gateway:8090 # Metadata service runs within api-gateway on port 8090
+      ORCHESTRATION_SERVICE_URL: http://orchestration-service:8084
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: password
+      DB_NAME: metadata_db
+      DB_SSLMODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api-gateway:
+        condition: service_started
+      orchestration-service:
+        condition: service_started
+    restart: unless-stopped
+
+  orchestration-service:
+    build:
+      context: ./backend/orchestration
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084" # External port mapping
+    environment:
+      ORCHESTRATION_SERVICE_PORT: 8084 # Port the service listens on internally
+      METADATA_SERVICE_URL: http://api-gateway:8090 # Metadata service runs within api-gateway on port 8090
+      GROUPING_SERVICE_URL: http://grouping-service:8083
+      NATS_URL: nats://nats:4222
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: password
+      DB_NAME: metadata_db
+      DB_SSLMODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started # NATS starts quickly, no complex healthcheck needed usually
+      api-gateway:
+        condition: service_started
+      grouping-service:
+        condition: service_started
+    restart: unless-stopped
+
+  webhook-action-executor:
+    build:
+      context: ./backend/actionexecutor/webhook
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+  scheduler-service:
+    build:
+      context: ./backend/scheduler
+      dockerfile: Dockerfile
+    environment:
+      # SCHEDULER_SERVICE_PORT: 8085 # Not currently used by the service
+      METADATA_SERVICE_URL: http://api-gateway:8080
+      INGESTION_SERVICE_URL: http://ingestion-service:8081
+      # GROUPING_SERVICE_URL: http://grouping-service:8083 # Add if scheduler directly calls grouping
+      # ORCHESTRATION_SERVICE_URL: http://orchestration-service:8084 # Add if scheduler directly calls orchestration
+    depends_on:
+      - api-gateway # For METADATA_SERVICE_URL
+      - ingestion-service # For INGESTION_SERVICE_URL
+      # - grouping-service # Add if used
+      # - orchestration-service # Add if used
+    restart: unless-stopped
