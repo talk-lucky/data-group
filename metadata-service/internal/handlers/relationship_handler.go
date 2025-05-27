@@ -81,6 +81,30 @@ func CreateRelationship(c *gin.Context) {
 	// 	return
 	// }
 
+	// Check for circular dependency (inverse relationship)
+	var inverseRelationshipCount int64
+	if err := db.Model(&models.EntityRelationshipDefinition{}).
+		Where("source_entity_id = ? AND target_entity_id = ?", targetEntityID, sourceEntityID).
+		Count(&inverseRelationshipCount).Error; err != nil {
+		// This is an actual database error, not "not found"
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error during circular dependency check: " + err.Error()})
+		return
+	}
+
+	if inverseRelationshipCount > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "A circular dependency would be created. An inverse relationship already exists.",
+			"details": gin.H{
+				"proposed_source_id": sourceEntityID,
+				"proposed_target_id": targetEntityID,
+				"conflicting_relationship_direction": gin.H{
+					"source_id": targetEntityID,
+					"target_id": sourceEntityID,
+				},
+			},
+		})
+		return
+	}
 
 	relationship := models.EntityRelationshipDefinition{
 		ID:               uuid.New(),
@@ -210,6 +234,7 @@ func GetRelationship(c *gin.Context) {
 // @Success 200 {object} models.EntityRelationshipDefinition "Successfully updated entity relationship"
 // @Failure 400 {object} gin.H "Invalid request payload or ID format"
 // @Failure 404 {object} gin.H "Entity relationship not found"
+// @Failure 409 {object} gin.H "Conflict due to existing relationship (e.g. unique constraint, circular dependency)"
 // @Failure 422 {object} gin.H "Invalid relationship type or validation error"
 // @Failure 500 {object} gin.H "Internal server error"
 // @Router /relationships/{id} [put]

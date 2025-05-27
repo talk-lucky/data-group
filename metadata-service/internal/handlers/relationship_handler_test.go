@@ -232,6 +232,90 @@ func TestCreateRelationship(t *testing.T) {
 		// The handler returns 409 Conflict for unique constraint violations
 		assert.Equal(t, http.StatusConflict, w.Code)
 	})
+
+	t.Run("Circular Dependency Check", func(t *testing.T) {
+		clearTable() // Clear entities first
+		clearRelationshipTable()
+
+		entityA := createTestEntityForRelationships(t, "EntityA_Circ")
+		entityB := createTestEntityForRelationships(t, "EntityB_Circ")
+
+		// Step 1: Create a valid initial relationship (A -> B)
+		payload_A_to_B := models.CreateEntityRelationshipRequest{
+			Name:             "Rel_A_to_B",
+			SourceEntityID:   entityA.ID.String(),
+			TargetEntityID:   entityB.ID.String(),
+			RelationshipType: "ONE_TO_ONE",
+		}
+		jsonPayload_A_to_B, _ := json.Marshal(payload_A_to_B)
+		w1 := httptest.NewRecorder()
+		req1, _ := http.NewRequest("POST", "/api/v1/relationships", bytes.NewBuffer(jsonPayload_A_to_B))
+		req1.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w1, req1)
+		assert.Equal(t, http.StatusCreated, w1.Code, "Creating A->B relationship should succeed")
+
+		// Step 2: Attempt to create a circular relationship (B -> A)
+		payload_B_to_A := models.CreateEntityRelationshipRequest{
+			Name:             "Rel_B_to_A",
+			SourceEntityID:   entityB.ID.String(), // Source is B
+			TargetEntityID:   entityA.ID.String(), // Target is A
+			RelationshipType: "ONE_TO_ONE",
+		}
+		jsonPayload_B_to_A, _ := json.Marshal(payload_B_to_A)
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest("POST", "/api/v1/relationships", bytes.NewBuffer(jsonPayload_B_to_A))
+		req2.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w2, req2)
+
+		assert.Equal(t, http.StatusConflict, w2.Code, "Creating B->A relationship should be a conflict")
+
+		var errorResponse map[string]interface{}
+		err := json.Unmarshal(w2.Body.Bytes(), &errorResponse)
+		assert.NoError(t, err, "Failed to unmarshal error response")
+		assert.Equal(t, "A circular dependency would be created. An inverse relationship already exists.", errorResponse["error"])
+
+		details, ok := errorResponse["details"].(map[string]interface{})
+		assert.True(t, ok, "Error response details not found or not in expected format")
+		if ok {
+			assert.Equal(t, entityB.ID.String(), details["proposed_source_id"], "Proposed source ID should be EntityB")
+			assert.Equal(t, entityA.ID.String(), details["proposed_target_id"], "Proposed target ID should be EntityA")
+
+			conflictingDir, okDir := details["conflicting_relationship_direction"].(map[string]interface{})
+			assert.True(t, okDir, "Conflicting direction details not found")
+			if okDir {
+				assert.Equal(t, entityA.ID.String(), conflictingDir["source_id"], "Conflicting source ID should be EntityA")
+				assert.Equal(t, entityB.ID.String(), conflictingDir["target_id"], "Conflicting target ID should be EntityB")
+			}
+		}
+
+		// Step 3: Ensure different relationship types still trigger the conflict (B -> A with different type)
+		payload_B_to_A_alt_type := models.CreateEntityRelationshipRequest{
+			Name:             "Rel_B_to_A_OTM",
+			SourceEntityID:   entityB.ID.String(),
+			TargetEntityID:   entityA.ID.String(),
+			RelationshipType: "ONE_TO_MANY", // Different type
+		}
+		jsonPayload_B_to_A_alt_type, _ := json.Marshal(payload_B_to_A_alt_type)
+		w3 := httptest.NewRecorder()
+		req3, _ := http.NewRequest("POST", "/api/v1/relationships", bytes.NewBuffer(jsonPayload_B_to_A_alt_type))
+		req3.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w3, req3)
+		assert.Equal(t, http.StatusConflict, w3.Code, "Creating B->A with different type should still conflict")
+
+		// Step 4: Ensure creating another A->B relationship (with a different name) is still fine
+		payload_A_to_B_again := models.CreateEntityRelationshipRequest{
+			Name:             "Rel_A_to_B_Second", // Different name
+			SourceEntityID:   entityA.ID.String(),
+			TargetEntityID:   entityB.ID.String(),
+			RelationshipType: "ONE_TO_ONE",
+		}
+		jsonPayload_A_to_B_again, _ := json.Marshal(payload_A_to_B_again)
+		w4 := httptest.NewRecorder()
+		req4, _ := http.NewRequest("POST", "/api/v1/relationships", bytes.NewBuffer(jsonPayload_A_to_B_again))
+		req4.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w4, req4)
+		assert.Equal(t, http.StatusCreated, w4.Code, "Creating another A->B with a different name should succeed")
+	})
 }
 
 func TestListRelationships(t *testing.T) {
