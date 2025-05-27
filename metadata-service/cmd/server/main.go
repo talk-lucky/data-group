@@ -67,6 +67,19 @@ func main() {
 			attributeRoutes.PUT("/:attribute_id", handlers.UpdateAttribute)
 			attributeRoutes.DELETE("/:attribute_id", handlers.DeleteAttribute)
 		}
+
+		// Routes for entity relationships
+		relationshipRoutes := v1.Group("/relationships")
+		{
+			relationshipRoutes.POST("/", handlers.CreateRelationship)
+			relationshipRoutes.GET("/", handlers.ListRelationships)
+			relationshipRoutes.GET("/:id", handlers.GetRelationship)
+			relationshipRoutes.PUT("/:id", handlers.UpdateRelationship)
+			relationshipRoutes.DELETE("/:id", handlers.DeleteRelationship)
+		}
+
+		// Add route to list relationships for a specific entity
+		entityRoutes.GET("/:id/relationships", handlers.ListRelationships)
 	}
 
 	// Swagger documentation endpoint

@@ -24,6 +24,7 @@ type MockMetadataServiceClient struct {
 	GetGroupDefinitionFunc     func(groupID string) (*GroupDefinition, error)
 	GetEntityDefinitionFunc    func(entityID string) (*EntityDefinition, error)
 	GetAttributeDefinitionFunc func(entityID string, attributeID string) (*AttributeDefinition, error)
+	GetEntityRelationshipFunc  func(relationshipID string) (*EntityRelationshipDefinition, error) // Added
 	ListWorkflowsFunc          func() ([]WorkflowDefinition, error)
 }
 
@@ -53,6 +54,13 @@ func (m *MockMetadataServiceClient) ListWorkflows() ([]WorkflowDefinition, error
 		return m.ListWorkflowsFunc()
 	}
 	return nil, fmt.Errorf("ListWorkflowsFunc not implemented")
+}
+
+func (m *MockMetadataServiceClient) GetEntityRelationship(relationshipID string) (*EntityRelationshipDefinition, error) {
+	if m.GetEntityRelationshipFunc != nil {
+		return m.GetEntityRelationshipFunc(relationshipID)
+	}
+	return nil, fmt.Errorf("GetEntityRelationshipFunc not implemented")
 }
 
 // --- Mock OrchestrationServiceClient ---
@@ -799,6 +807,269 @@ func TestCalculateGroup(t *testing.T) {
 
 	})
 
+	// --- Tests for RelatedAttributeCondition within CalculateGroup ---
+
+	t.Run("RelatedAttributeCondition Simple (Customer with SHIPPED Order)", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Metadata
+		customerEntityID := "customer_entity_id"
+		orderEntityID := "order_entity_id"
+		custIDAttrID := "cust_id_attr"
+		orderCustFKAttrID := "order_cust_fk_attr"
+		orderStatusAttrID := "order_status_attr"
+		custOrderRelID := "cust_order_rel_id"
+
+		groupDef := &GroupDefinition{
+			ID:       "group_shipped_orders",
+			Name:     "Customers with Shipped Orders",
+			EntityID: customerEntityID,
+			RulesJSON: fmt.Sprintf(`{
+                "type": "group",
+                "entity_id": "%s",
+                "logical_operator": "AND",
+                "rules": [
+                    {
+                        "type": "related_attribute_condition",
+                        "relationship_id": "%s",
+                        "attribute_id": "%s",
+                        "attribute_name": "OrderStatus",
+                        "operator": "=",
+                        "value": "SHIPPED",
+                        "value_type": "STRING"
+                    }
+                ]
+            }`, customerEntityID, custOrderRelID, orderStatusAttrID),
+		}
+
+		mockMetaClient.GetGroupDefinitionFunc = func(groupID string) (*GroupDefinition, error) { return groupDef, nil }
+		mockMetaClient.GetAttributeDefinitionFunc = func(entityID string, attributeID string) (*AttributeDefinition, error) {
+			switch attributeID {
+			case custIDAttrID:
+				return &AttributeDefinition{ID: custIDAttrID, EntityID: customerEntityID, Name: "customer_id", DataType: "STRING"}, nil
+			case orderCustFKAttrID:
+				return &AttributeDefinition{ID: orderCustFKAttrID, EntityID: orderEntityID, Name: "order_customer_fk", DataType: "STRING"}, nil
+			case orderStatusAttrID:
+				return &AttributeDefinition{ID: orderStatusAttrID, EntityID: orderEntityID, Name: "OrderStatus", DataType: "STRING"}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetAttributeDefinition call: %s/%s", entityID, attributeID)
+		}
+		mockMetaClient.GetEntityRelationshipFunc = func(relationshipID string) (*EntityRelationshipDefinition, error) {
+			if relationshipID == custOrderRelID {
+				return &EntityRelationshipDefinition{
+					ID:                custOrderRelID,
+					SourceEntityID:    customerEntityID,
+					SourceAttributeID: custIDAttrID,
+					TargetEntityID:    orderEntityID,
+					TargetAttributeID: orderCustFKAttrID,
+				}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetEntityRelationship call: %s", relationshipID)
+		}
+		mockOrchClient.TriggerWorkflowCalled = false
+
+		service := NewGroupingService(mockMetaClient, mockOrchClient, db)
+
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WithArgs(groupDef.ID, groupDef.EntityID, 0, "CALCULATING", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("DELETE FROM group_memberships").WithArgs(groupDef.ID).WillReturnResult(sqlmock.NewResult(0, 0))
+
+		// Expected SQL:
+		// SELECT pe1.id FROM processed_entities pe1
+		// WHERE pe1.entity_definition_id = $1
+		// AND (EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $2 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'OrderStatus') = $3)))
+		
+		// Note: sqlmock uses $1, $2, etc. for placeholders. The actual numbers depend on the order of parameter generation.
+		// $1 = customerEntityID (primary entity)
+		// $2 = orderEntityID (target entity in subquery)
+		// $3 = "SHIPPED" (value for OrderStatus)
+
+		rows := sqlmock.NewRows([]string{"id"}).AddRow("cust1_uuid") // Customer 1 has a shipped order
+		expectedSQLRegex := regexp.QuoteMeta("SELECT pe1.id FROM processed_entities pe1 WHERE pe1.entity_definition_id = $1 AND (EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $2 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'OrderStatus') = $3)))")
+		mock.ExpectQuery(expectedSQLRegex).WithArgs(customerEntityID, orderEntityID, "SHIPPED").WillReturnRows(rows)
+
+		mock.ExpectPrepare("INSERT INTO group_memberships")
+		mock.ExpectExec("INSERT INTO group_memberships").WithArgs(groupDef.ID, "cust1_uuid").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WithArgs(groupDef.ID, groupDef.EntityID, 1, "COMPLETED", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		ids, err := service.CalculateGroup(groupDef.ID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"cust1_uuid"}, ids)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("RelatedAttributeCondition CombinedWithLocal (Active Customer with SHIPPED Order)", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		customerEntityID := "customer_entity_id_combo"
+		orderEntityID := "order_entity_id_combo"
+		custIDAttrID := "cust_id_attr_combo"
+		custStatusAttrID := "cust_status_attr_combo"
+		orderCustFKAttrID := "order_cust_fk_attr_combo"
+		orderStatusAttrID := "order_status_attr_combo"
+		custOrderRelID := "cust_order_rel_id_combo"
+
+		groupDef := &GroupDefinition{
+			ID:       "group_active_shipped",
+			Name:     "Active Customers with Shipped Orders",
+			EntityID: customerEntityID,
+			RulesJSON: fmt.Sprintf(`{
+                "type": "group",
+                "entity_id": "%s",
+                "logical_operator": "AND",
+                "rules": [
+                    {
+                        "type": "condition",
+                        "attribute_id": "%s",
+                        "attribute_name": "Status",
+                        "operator": "=",
+                        "value": "ACTIVE",
+                        "value_type": "STRING"
+                    },
+                    {
+                        "type": "related_attribute_condition",
+                        "relationship_id": "%s",
+                        "attribute_id": "%s",
+                        "attribute_name": "OrderStatus",
+                        "operator": "=",
+                        "value": "SHIPPED",
+                        "value_type": "STRING"
+                    }
+                ]
+            }`, customerEntityID, custStatusAttrID, custOrderRelID, orderStatusAttrID),
+		}
+
+		mockMetaClient.GetGroupDefinitionFunc = func(groupID string) (*GroupDefinition, error) { return groupDef, nil }
+		mockMetaClient.GetAttributeDefinitionFunc = func(entityID string, attributeID string) (*AttributeDefinition, error) {
+			switch attributeID {
+			case custIDAttrID: return &AttributeDefinition{ID: custIDAttrID, EntityID: customerEntityID, Name: "customer_id", DataType: "STRING"}, nil
+			case custStatusAttrID: return &AttributeDefinition{ID: custStatusAttrID, EntityID: customerEntityID, Name: "Status", DataType: "STRING"}, nil
+			case orderCustFKAttrID: return &AttributeDefinition{ID: orderCustFKAttrID, EntityID: orderEntityID, Name: "order_customer_fk", DataType: "STRING"}, nil
+			case orderStatusAttrID: return &AttributeDefinition{ID: orderStatusAttrID, EntityID: orderEntityID, Name: "OrderStatus", DataType: "STRING"}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetAttributeDefinition call: %s/%s", entityID, attributeID)
+		}
+		mockMetaClient.GetEntityRelationshipFunc = func(relationshipID string) (*EntityRelationshipDefinition, error) {
+			if relationshipID == custOrderRelID {
+				return &EntityRelationshipDefinition{ID: custOrderRelID, SourceEntityID: customerEntityID, SourceAttributeID: custIDAttrID, TargetEntityID: orderEntityID, TargetAttributeID: orderCustFKAttrID}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetEntityRelationship call: %s", relationshipID)
+		}
+		mockOrchClient.TriggerWorkflowCalled = false
+
+		service := NewGroupingService(mockMetaClient, mockOrchClient, db)
+
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("DELETE FROM group_memberships").WillReturnResult(sqlmock.NewResult(0, 0))
+
+		// Expected SQL:
+		// SELECT pe1.id FROM processed_entities pe1
+		// WHERE pe1.entity_definition_id = $1 
+		// AND ((pe1.attributes->>'Status') = $2 
+		// AND EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $3 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'OrderStatus') = $4)))
+		// $1 = customerEntityID
+		// $2 = "ACTIVE"
+		// $3 = orderEntityID
+		// $4 = "SHIPPED"
+		rows := sqlmock.NewRows([]string{"id"}).AddRow("cust1_uuid")
+		expectedSQLRegex := regexp.QuoteMeta("SELECT pe1.id FROM processed_entities pe1 WHERE pe1.entity_definition_id = $1 AND ((pe1.attributes->>'Status') = $2 AND EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $3 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'OrderStatus') = $4)))")
+		mock.ExpectQuery(expectedSQLRegex).WithArgs(customerEntityID, "ACTIVE", orderEntityID, "SHIPPED").WillReturnRows(rows)
+
+		mock.ExpectPrepare("INSERT INTO group_memberships")
+		mock.ExpectExec("INSERT INTO group_memberships").WithArgs(groupDef.ID, "cust1_uuid").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		ids, err := service.CalculateGroup(groupDef.ID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"cust1_uuid"}, ids)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("RelatedAttributeCondition Integer (Customer with Order ItemCount > 5)", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		customerEntityID := "customer_entity_id_int"
+		orderEntityID := "order_entity_id_int"
+		custIDAttrID := "cust_id_attr_int"
+		orderCustFKAttrID := "order_cust_fk_attr_int"
+		orderItemCountAttrID := "order_item_count_attr_int"
+		custOrderRelID := "cust_order_rel_id_int"
+
+		groupDef := &GroupDefinition{
+			ID:       "group_item_count",
+			Name:     "Customers with Order ItemCount > 5",
+			EntityID: customerEntityID,
+			RulesJSON: fmt.Sprintf(`{
+                "type": "group",
+                "entity_id": "%s",
+                "logical_operator": "AND",
+                "rules": [
+                    {
+                        "type": "related_attribute_condition",
+                        "relationship_id": "%s",
+                        "attribute_id": "%s",
+                        "attribute_name": "ItemCount",
+                        "operator": ">",
+                        "value": 5,
+                        "value_type": "INTEGER"
+                    }
+                ]
+            }`, customerEntityID, custOrderRelID, orderItemCountAttrID),
+		}
+
+		mockMetaClient.GetGroupDefinitionFunc = func(groupID string) (*GroupDefinition, error) { return groupDef, nil }
+		mockMetaClient.GetAttributeDefinitionFunc = func(entityID string, attributeID string) (*AttributeDefinition, error) {
+			switch attributeID {
+			case custIDAttrID: return &AttributeDefinition{ID: custIDAttrID, EntityID: customerEntityID, Name: "customer_id", DataType: "STRING"}, nil
+			case orderCustFKAttrID: return &AttributeDefinition{ID: orderCustFKAttrID, EntityID: orderEntityID, Name: "order_customer_fk", DataType: "STRING"}, nil
+			case orderItemCountAttrID: return &AttributeDefinition{ID: orderItemCountAttrID, EntityID: orderEntityID, Name: "ItemCount", DataType: "INTEGER"}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetAttributeDefinition call: %s/%s", entityID, attributeID)
+		}
+		mockMetaClient.GetEntityRelationshipFunc = func(relationshipID string) (*EntityRelationshipDefinition, error) {
+			if relationshipID == custOrderRelID {
+				return &EntityRelationshipDefinition{ID: custOrderRelID, SourceEntityID: customerEntityID, SourceAttributeID: custIDAttrID, TargetEntityID: orderEntityID, TargetAttributeID: orderCustFKAttrID}, nil
+			}
+			return nil, fmt.Errorf("unexpected GetEntityRelationship call: %s", relationshipID)
+		}
+		mockOrchClient.TriggerWorkflowCalled = false
+
+		service := NewGroupingService(mockMetaClient, mockOrchClient, db)
+
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("DELETE FROM group_memberships").WillReturnResult(sqlmock.NewResult(0, 0))
+
+		// Expected SQL for ItemCount > 5:
+		// SELECT pe1.id FROM processed_entities pe1
+		// WHERE pe1.entity_definition_id = $1
+		// AND (EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $2 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'ItemCount')::bigint > $3)))
+		// $1 = customerEntityID
+		// $2 = orderEntityID
+		// $3 = 5
+		rows := sqlmock.NewRows([]string{"id"}).AddRow("cust1_uuid_int")
+		expectedSQLRegex := regexp.QuoteMeta("SELECT pe1.id FROM processed_entities pe1 WHERE pe1.entity_definition_id = $1 AND (EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $2 AND (pe1.attributes->>'customer_id') = (pe2.attributes->>'order_customer_fk') AND ((pe2.attributes->>'ItemCount')::bigint > $3)))")
+		mock.ExpectQuery(expectedSQLRegex).WithArgs(customerEntityID, orderEntityID, 5).WillReturnRows(rows)
+		
+		mock.ExpectPrepare("INSERT INTO group_memberships")
+		mock.ExpectExec("INSERT INTO group_memberships").WithArgs(groupDef.ID, "cust1_uuid_int").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("INSERT INTO group_calculation_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		ids, err := service.CalculateGroup(groupDef.ID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"cust1_uuid_int"}, ids)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 
