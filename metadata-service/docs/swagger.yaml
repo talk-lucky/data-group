@@ -1,0 +1,519 @@
+basePath: /api/v1
+definitions:
+  models.AttributeDefinition:
+    description: AttributeDefinition represents the structure for an attribute definition.
+    properties:
+      created_at:
+        type: string
+      data_type:
+        enum:
+        - STRING
+        - TEXT
+        - INTEGER
+        - FLOAT
+        - BOOLEAN
+        - DATETIME
+        type: string
+      description:
+        type: string
+      entity_id:
+        description: Part of composite unique index
+        type: string
+      id:
+        type: string
+      is_filterable:
+        type: boolean
+      is_pii:
+        type: boolean
+      name:
+        description: Part of composite unique index
+        maxLength: 255
+        minLength: 1
+        type: string
+      updated_at:
+        type: string
+    required:
+    - data_type
+    - entity_id
+    - name
+    type: object
+  models.CreateAttributeRequest:
+    properties:
+      data_type:
+        enum:
+        - STRING
+        - TEXT
+        - INTEGER
+        - FLOAT
+        - BOOLEAN
+        - DATETIME
+        type: string
+      description:
+        maxLength: 1000
+        type: string
+      is_filterable:
+        description: Pointer to distinguish between false and not provided
+        type: boolean
+      is_pii:
+        description: Pointer to distinguish between false and not provided
+        type: boolean
+      name:
+        maxLength: 255
+        minLength: 1
+        type: string
+    required:
+    - data_type
+    - name
+    type: object
+  models.CreateEntityRequest:
+    properties:
+      description:
+        maxLength: 1000
+        type: string
+      name:
+        maxLength: 255
+        minLength: 1
+        type: string
+    required:
+    - name
+    type: object
+  models.EntityDefinition:
+    description: EntityDefinition represents the structure for an entity definition.
+    properties:
+      attributes:
+        items:
+          $ref: '#/definitions/models.AttributeDefinition'
+        type: array
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        maxLength: 255
+        minLength: 1
+        type: string
+      updated_at:
+        type: string
+    required:
+    - name
+    type: object
+  models.UpdateAttributeRequest:
+    properties:
+      data_type:
+        enum:
+        - STRING
+        - TEXT
+        - INTEGER
+        - FLOAT
+        - BOOLEAN
+        - DATETIME
+        type: string
+      description:
+        maxLength: 1000
+        type: string
+      is_filterable:
+        type: boolean
+      is_pii:
+        type: boolean
+      name:
+        maxLength: 255
+        minLength: 1
+        type: string
+    type: object
+  models.UpdateEntityRequest:
+    properties:
+      description:
+        maxLength: 1000
+        type: string
+      name:
+        maxLength: 255
+        minLength: 1
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: This is a sample server for a metadata service.
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: Metadata Service API
+  version: "1.0"
+paths:
+  /attributes/{attribute_id}:
+    delete:
+      description: Delete an attribute definition by its UUID.
+      parameters:
+      - description: Attribute Definition ID (UUID)
+        in: path
+        name: attribute_id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Successfully deleted attribute definition
+        "400":
+          description: Invalid ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Attribute definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Delete an attribute definition
+      tags:
+      - attributes
+    get:
+      description: Get detailed information about a specific attribute definition
+        using its UUID.
+      parameters:
+      - description: Attribute Definition ID (UUID)
+        in: path
+        name: attribute_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully retrieved attribute definition
+          schema:
+            $ref: '#/definitions/models.AttributeDefinition'
+        "400":
+          description: Invalid ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Attribute definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get a specific attribute definition by ID
+      tags:
+      - attributes
+    put:
+      consumes:
+      - application/json
+      description: Update an existing attribute definition's fields. EntityID cannot
+        be changed.
+      parameters:
+      - description: Attribute Definition ID (UUID)
+        in: path
+        name: attribute_id
+        required: true
+        type: string
+      - description: Attribute Definition fields to update
+        in: body
+        name: attribute_definition
+        required: true
+        schema:
+          $ref: '#/definitions/models.UpdateAttributeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully updated attribute definition
+          schema:
+            $ref: '#/definitions/models.AttributeDefinition'
+        "400":
+          description: Invalid request payload or ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Attribute definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Update an existing attribute definition
+      tags:
+      - attributes
+  /entities:
+    get:
+      description: Get a list of all entity definitions.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully retrieved list of entity definitions
+          schema:
+            items:
+              $ref: '#/definitions/models.EntityDefinition'
+            type: array
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List all entity definitions
+      tags:
+      - entities
+    post:
+      consumes:
+      - application/json
+      description: Create a new entity definition with the provided name and description.
+      parameters:
+      - description: Entity Definition to create
+        in: body
+        name: entity_definition
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateEntityRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Successfully created entity definition
+          schema:
+            $ref: '#/definitions/models.EntityDefinition'
+        "400":
+          description: Invalid request payload
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a new entity definition
+      tags:
+      - entities
+  /entities/{id}:
+    delete:
+      description: Delete an entity definition by its UUID.
+      parameters:
+      - description: Entity Definition ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Successfully deleted entity definition
+        "400":
+          description: Invalid ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Entity definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Delete an entity definition
+      tags:
+      - entities
+    get:
+      description: Get detailed information about a specific entity definition using
+        its UUID.
+      parameters:
+      - description: Entity Definition ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully retrieved entity definition
+          schema:
+            $ref: '#/definitions/models.EntityDefinition'
+        "400":
+          description: Invalid ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Entity definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get a specific entity definition by ID
+      tags:
+      - entities
+    put:
+      consumes:
+      - application/json
+      description: Update an existing entity definition's name and/or description.
+      parameters:
+      - description: Entity Definition ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Entity Definition fields to update
+        in: body
+        name: entity_definition
+        required: true
+        schema:
+          $ref: '#/definitions/models.UpdateEntityRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully updated entity definition
+          schema:
+            $ref: '#/definitions/models.EntityDefinition'
+        "400":
+          description: Invalid request payload or ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Entity definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Update an existing entity definition
+      tags:
+      - entities
+  /entities/{id}/attributes:
+    get:
+      description: Get a list of all attribute definitions associated with a given
+        entity ID.
+      parameters:
+      - description: Entity ID (UUID)
+        in: path
+        name: entity_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Successfully retrieved list of attribute definitions
+          schema:
+            items:
+              $ref: '#/definitions/models.AttributeDefinition'
+            type: array
+        "400":
+          description: Invalid Entity ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Entity definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List all attributes for a specific entity
+      tags:
+      - attributes
+    post:
+      consumes:
+      - application/json
+      description: Create a new attribute definition for a specific entity.
+      parameters:
+      - description: Entity ID (UUID)
+        in: path
+        name: entity_id
+        required: true
+        type: string
+      - description: Attribute Definition to create
+        in: body
+        name: attribute_definition
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateAttributeRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Successfully created attribute definition
+          schema:
+            $ref: '#/definitions/models.AttributeDefinition'
+        "400":
+          description: Invalid request payload or Entity ID format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Entity definition not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error or unique constraint violation
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a new attribute for an entity
+      tags:
+      - attributes
+schemes:
+- http
+- https
+swagger: "2.0"
