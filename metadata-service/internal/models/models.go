@@ -17,6 +17,13 @@ var ValidDataTypes = map[string]bool{
 	// "RELATIONSHIP": true, // Future consideration
 }
 
+// ValidRelationshipTypes defines the allowed types for entity relationships.
+var ValidRelationshipTypes = map[string]bool{
+	"ONE_TO_ONE":   true,
+	"ONE_TO_MANY":  true,
+	"MANY_TO_MANY": true,
+}
+
 // EntityDefinition represents the structure for an entity definition.
 // @Description EntityDefinition represents the structure for an entity definition.
 type EntityDefinition struct {
@@ -71,4 +78,35 @@ type UpdateAttributeRequest struct {
 	Description   *string `json:"description,omitempty" binding:"omitempty,max=1000"`
 	IsFilterable  *bool   `json:"is_filterable,omitempty"`
 	IsPII         *bool   `json:"is_pii,omitempty"`
+}
+
+// EntityRelationshipDefinition represents the structure for an entity relationship definition.
+// @Description EntityRelationshipDefinition represents the structure for an entity relationship definition.
+type EntityRelationshipDefinition struct {
+	ID               uuid.UUID `json:"id" gorm:"type:uuid;primary_key"`
+	Name             string    `json:"name,omitempty" binding:"omitempty,max=255" gorm:"type:varchar(255)"`
+	SourceEntityID   uuid.UUID `json:"source_entity_id" binding:"required" gorm:"type:uuid;not null"`
+	TargetEntityID   uuid.UUID `json:"target_entity_id" binding:"required" gorm:"type:uuid;not null"`
+	RelationshipType string    `json:"relationship_type" binding:"required,oneof=ONE_TO_ONE ONE_TO_MANY MANY_TO_MANY" gorm:"type:varchar(50);not null"`
+	Description      string    `json:"description,omitempty" gorm:"type:text"`
+	CreatedAt        time.Time `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt        time.Time `json:"updated_at" gorm:"autoUpdateTime"`
+	// SourceEntity     EntityDefinition `json:"-" gorm:"foreignKey:SourceEntityID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"` // RESTRICT to prevent deletion if relationships exist
+	// TargetEntity     EntityDefinition `json:"-" gorm:"foreignKey:TargetEntityID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
+}
+
+// CreateEntityRelationshipRequest defines the request payload for creating an entity relationship.
+type CreateEntityRelationshipRequest struct {
+	Name             string `json:"name,omitempty" binding:"omitempty,max=255"`
+	SourceEntityID   string `json:"source_entity_id" binding:"required,uuid"`
+	TargetEntityID   string `json:"target_entity_id" binding:"required,uuid"`
+	RelationshipType string `json:"relationship_type" binding:"required,oneof=ONE_TO_ONE ONE_TO_MANY MANY_TO_MANY"`
+	Description      string `json:"description,omitempty" binding:"omitempty,max=1000"`
+}
+
+// UpdateEntityRelationshipRequest defines the request payload for updating an entity relationship.
+type UpdateEntityRelationshipRequest struct {
+	Name             *string `json:"name,omitempty" binding:"omitempty,max=255"`
+	RelationshipType *string `json:"relationship_type,omitempty" binding:"omitempty,oneof=ONE_TO_ONE ONE_TO_MANY MANY_TO_MANY"`
+	Description      *string `json:"description,omitempty" binding:"omitempty,max=1000"`
 }
