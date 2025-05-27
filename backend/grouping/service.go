@@ -41,6 +41,17 @@ type RelationshipGroupNode struct {
 	// Optional: JoinType string `json:"join_type,omitempty"` // e.g., EXISTS, NOT_EXISTS, AT_LEAST_ONE_MATCH
 }
 
+// RelatedAttributeCondition defines a condition on an attribute of a related entity.
+type RelatedAttributeCondition struct {
+	Type             string      `json:"type"` // "related_attribute_condition"
+	RelationshipID   string      `json:"relationship_id"`   // ID of the EntityRelationshipDefinition
+	AttributeID      string      `json:"attribute_id"`      // AttributeID on the TARGET entity of the relationship
+	AttributeName    string      `json:"attribute_name"`    // Name of the attribute on the TARGET entity
+	Operator         string      `json:"operator"`
+	Value            interface{} `json:"value"`
+	ValueType        string      `json:"value_type"`        // Data type of the value for casting, e.g., "STRING", "INTEGER"
+}
+
 // GenericRule is used to determine the type of a rule before full unmarshalling.
 type GenericRule struct {
 	Type string `json:"type"`
@@ -306,6 +317,55 @@ func getAllAttributeIDsAndNamesRecursive(
 			if err := getAllAttributeIDsAndNamesRecursive(relatedRulesGroup, attrInfoMap, entityAttrMap, relationshipIDsMap, metadataClient, relDef.TargetEntityID); err != nil {
 				return err
 			}
+		
+		case "related_attribute_condition":
+			var condition RelatedAttributeCondition
+			if err := json.Unmarshal(rawRule, &condition); err != nil {
+				return fmt.Errorf("failed to unmarshal related_attribute_condition: %w", err)
+			}
+			if metadataClient == nil {
+				return fmt.Errorf("metadataClient is nil, cannot process related_attribute_condition for relationship %s", condition.RelationshipID)
+			}
+
+			relationshipIDsMap[condition.RelationshipID] = true // Collect relationship ID
+
+			relDef, err := metadataClient.GetEntityRelationship(condition.RelationshipID)
+			if err != nil {
+				return fmt.Errorf("failed to fetch entity relationship %s for related_attribute_condition: %w", condition.RelationshipID, err)
+			}
+
+			// Attribute being conditioned on (belongs to target entity)
+			targetEntityID := relDef.TargetEntityID
+			if condition.AttributeID == "" || condition.AttributeName == "" {
+                 return fmt.Errorf("related_attribute_condition for relationship '%s' found with empty AttributeID ('%s') or AttributeName ('%s')", condition.RelationshipID, condition.AttributeID, condition.AttributeName)
+            }
+			attrInfoMap[condition.AttributeID] = condition.AttributeName
+			if _, ok := entityAttrMap[targetEntityID]; !ok {
+				entityAttrMap[targetEntityID] = make(map[string]string)
+			}
+			entityAttrMap[targetEntityID][condition.AttributeID] = condition.AttributeName
+
+			// Collect join attributes from the relationship definition itself
+			// Source join attribute (belongs to source entity of relationship)
+			sourceJoinEntityID := relDef.SourceEntityID
+			if relDef.SourceAttributeID == "" {
+				return fmt.Errorf("relationship definition %s is missing SourceAttributeID", relDef.ID)
+			}
+			attrInfoMap[relDef.SourceAttributeID] = "" // Name will be filled when attributeDefsMap is populated
+			if _, ok := entityAttrMap[sourceJoinEntityID]; !ok {
+				entityAttrMap[sourceJoinEntityID] = make(map[string]string)
+			}
+			entityAttrMap[sourceJoinEntityID][relDef.SourceAttributeID] = "" 
+
+			// Target join attribute (belongs to target entity of relationship)
+			if relDef.TargetAttributeID == "" {
+				return fmt.Errorf("relationship definition %s is missing TargetAttributeID", relDef.ID)
+			}
+			attrInfoMap[relDef.TargetAttributeID] = "" // Name will be filled
+			if _, ok := entityAttrMap[targetEntityID]; !ok { // Target entity map might have been created above
+				entityAttrMap[targetEntityID] = make(map[string]string)
+			}
+			entityAttrMap[targetEntityID][relDef.TargetAttributeID] = "" 
 
 		default:
 			return fmt.Errorf("unknown rule type: '%s' in rule group for entity '%s'", genericRule.Type, contextEntityID)
@@ -494,6 +554,117 @@ func buildWhereClauseRecursive(
 
 			if relatedWhereClause != "" {
 				subQuery.WriteString(fmt.Sprintf(" AND (%s)", relatedWhereClause))
+			}
+			subQuery.WriteString(")")
+			conditions = append(conditions, subQuery.String())
+
+		} else if genericRule.Type == "related_attribute_condition" {
+			var relCond RelatedAttributeCondition
+			if err := json.Unmarshal(rawRule, &relCond); err != nil {
+				return "", fmt.Errorf("failed to unmarshal related_attribute_condition: %w", err)
+			}
+
+			relDef, ok := relationshipDefsMap[relCond.RelationshipID]
+			if !ok {
+				return "", fmt.Errorf("relationship definition %s not found in pre-fetched map for RelatedAttributeCondition", relCond.RelationshipID)
+			}
+
+			if relDef.SourceEntityID != contextualEntityID {
+				return "", fmt.Errorf("RelatedAttributeCondition: relationship %s (source: %s) cannot originate from group with entity context %s", relDef.ID, relDef.SourceEntityID, contextualEntityID)
+			}
+
+			sourceJoinAttrDef, okSA := attributeDefsMap[relDef.SourceAttributeID]
+			if !okSA {
+				return "", fmt.Errorf("RelatedAttributeCondition: source join attribute definition %s (for relationship %s) not found", relDef.SourceAttributeID, relDef.ID)
+			}
+			targetJoinAttrDef, okTA := attributeDefsMap[relDef.TargetAttributeID]
+			if !okTA {
+				return "", fmt.Errorf("RelatedAttributeCondition: target join attribute definition %s (for relationship %s) not found", relDef.TargetAttributeID, relDef.ID)
+			}
+
+			conditionedAttrDef, okCA := attributeDefsMap[relCond.AttributeID]
+			if !okCA {
+				return "", fmt.Errorf("RelatedAttributeCondition: conditioned attribute definition %s (Name: %s) on target entity %s not found", relCond.AttributeID, relCond.AttributeName, relDef.TargetEntityID)
+			}
+			if conditionedAttrDef.EntityID != relDef.TargetEntityID { // Sanity check
+                 return "", fmt.Errorf("RelatedAttributeCondition: conditioned attribute %s (EntityID %s) does not belong to target entity %s of relationship %s", conditionedAttrDef.Name, conditionedAttrDef.EntityID, relDef.TargetEntityID, relDef.ID)
+            }
+			// Also check if provided AttributeName matches the definition, if AttributeName is part of relCond
+            if relCond.AttributeName != "" && relCond.AttributeName != conditionedAttrDef.Name {
+                log.Printf("Warning: RelatedAttributeCondition for AttrID '%s' has Name '%s', but definition has Name '%s'. Using definition's name.", relCond.AttributeID, relCond.AttributeName, conditionedAttrDef.Name)
+                // Potentially return an error here if strict matching is required.
+            }
+
+
+			newRelatedTableAlias := aliasGenerator()
+			var subQuery strings.Builder
+			subQuery.WriteString(fmt.Sprintf("EXISTS (SELECT 1 FROM processed_entities %s WHERE ", newRelatedTableAlias))
+
+			// Condition 1: Target Entity Type
+			subQuery.WriteString(fmt.Sprintf("%s.entity_definition_id = $%d", newRelatedTableAlias, *paramCounter))
+			*params = append(*params, relDef.TargetEntityID)
+			*paramCounter++
+
+			// Condition 2: Join Condition
+			subQuery.WriteString(fmt.Sprintf(" AND (%s.attributes->>'%s') = (%s.attributes->>'%s')",
+				currentTableAlias, sourceJoinAttrDef.Name,
+				newRelatedTableAlias, targetJoinAttrDef.Name))
+
+			// Condition 3: Actual Related Attribute Condition
+			valueType := relCond.ValueType
+			if valueType == "" { valueType = conditionedAttrDef.DataType }
+
+			fieldAccessor := fmt.Sprintf("(%s.attributes->>'%s')", newRelatedTableAlias, conditionedAttrDef.Name) // Use conditionedAttrDef.Name for safety
+			var castSuffix string
+			switch strings.ToLower(valueType) {
+			case "integer", "long": castSuffix = "::bigint"
+			case "float", "double", "decimal", "numeric": castSuffix = "::numeric"
+			case "boolean": castSuffix = "::boolean"
+			case "date", "datetime", "timestamp": castSuffix = "::timestamptz"
+			case "string", "text", "char", "varchar": castSuffix = ""
+			default: log.Printf("Warning (RelatedAttributeCondition): Unhandled ValueType '%s' for attribute '%s'. No cast.", valueType, conditionedAttrDef.Name); castSuffix = ""
+			}
+			if strings.HasSuffix(strings.ToLower(relCond.Operator), "null") { castSuffix = "" }
+			
+			var relatedAttrCondStr string
+			op := strings.ToLower(relCond.Operator)
+			switch op {
+			case "=", "!=", ">", "<", ">=", "<=":
+				if relCond.Value == nil { return "", fmt.Errorf("RelatedAttributeCondition: operator '%s' requires non-null value for attribute '%s'", op, conditionedAttrDef.Name) }
+				relatedAttrCondStr = fmt.Sprintf("%s%s %s $%d", fieldAccessor, castSuffix, op, *paramCounter)
+				*params = append(*params, relCond.Value)
+				*paramCounter++
+			case "like", "not like", "ilike", "not ilike":
+				if relCond.Value == nil { return "", fmt.Errorf("RelatedAttributeCondition: operator '%s' requires non-null value for attribute '%s'", op, conditionedAttrDef.Name) }
+				valStr, okV := relCond.Value.(string); if !okV { return "", fmt.Errorf("RelatedAttributeCondition: value for operator '%s' must be string for attribute '%s', got %T", op, conditionedAttrDef.Name, relCond.Value) }
+				relatedAttrCondStr = fmt.Sprintf("%s %s $%d", fieldAccessor, op, *paramCounter)
+				*params = append(*params, valStr)
+				*paramCounter++
+			case "contains", "does_not_contain":
+                 if relCond.Value == nil { return "", fmt.Errorf("RelatedAttributeCondition: operator '%s' requires non-null value for attribute '%s'", op, conditionedAttrDef.Name) }
+                 valStr, okV := relCond.Value.(string); if !okV { return "", fmt.Errorf("RelatedAttributeCondition: value for operator '%s' must be string for attribute '%s', got %T", op, conditionedAttrDef.Name, relCond.Value) }
+                 sqlOp := "LIKE"; if op == "does_not_contain" { sqlOp = "NOT LIKE"}
+                 relatedAttrCondStr = fmt.Sprintf("%s %s $%d", fieldAccessor, sqlOp, *paramCounter); *params = append(*params, "%"+valStr+"%"); *paramCounter++
+			case "in", "not in":
+				values, okV := relCond.Value.([]interface{}); if !okV || len(values) == 0 { 
+					if op == "in" { relatedAttrCondStr = "FALSE" } else { relatedAttrCondStr = "TRUE" }
+					log.Printf("RelatedAttributeCondition: Operator '%s' for attribute '%s' received empty/non-array value. Resulting in %s.", op, conditionedAttrDef.Name, relatedAttrCondStr)
+					break 
+				}
+				var placeholders []string
+				for _, v := range values { 
+					placeholders = append(placeholders, fmt.Sprintf("$%d", *paramCounter))
+					*params = append(*params, v)
+					*paramCounter++ 
+				}
+				relatedAttrCondStr = fmt.Sprintf("%s%s %s (%s)", fieldAccessor, castSuffix, strings.ToUpper(op), strings.Join(placeholders, ", "))
+			case "is null", "is_null": relatedAttrCondStr = fmt.Sprintf("%s IS NULL", fieldAccessor)
+			case "is not null", "is_not_null": relatedAttrCondStr = fmt.Sprintf("%s IS NOT NULL", fieldAccessor)
+			default: return "", fmt.Errorf("RelatedAttributeCondition: unsupported operator: '%s' for attribute '%s'", relCond.Operator, conditionedAttrDef.Name)
+			}
+			
+			if relatedAttrCondStr != "" {
+				subQuery.WriteString(fmt.Sprintf(" AND (%s)", relatedAttrCondStr))
 			}
 			subQuery.WriteString(")")
 			conditions = append(conditions, subQuery.String())
