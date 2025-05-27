@@ -14,28 +14,68 @@ import (
 )
 
 // --- Rule Structs ---
+// RuleCondition defines a single rule based on an attribute.
 type RuleCondition struct {
-	Type          string      `json:"type"` 
+	// Type field is implicit ("condition") and used for unmarshalling, not stored in this struct.
 	AttributeID   string      `json:"attribute_id"`
-	AttributeName string      `json:"attribute_name"` 
+	AttributeName string      `json:"attribute_name"`
+	EntityID      string      `json:"entity_id"` // Added EntityID
 	Operator      string      `json:"operator"`
-	Value         interface{} `json:"value"`       
-	ValueType     string      `json:"value_type"`  
+	Value         interface{} `json:"value"`
+	ValueType     string      `json:"value_type"`
 }
+
+// RuleGroup defines a logical grouping of rules or other rule groups.
 type RuleGroup struct {
-	Type      string            `json:"type"` 
-	Condition string            `json:"condition"` 
-	Rules     []json.RawMessage `json:"rules"`   
+	Type            string            `json:"type"` // "group"
+	EntityID        string            `json:"entity_id,omitempty"` // Primary entity for this group
+	LogicalOperator string            `json:"logical_operator"`
+	Rules           []json.RawMessage `json:"rules"`
 }
+
+// RelationshipGroupNode defines a rule based on a relationship to another entity.
+type RelationshipGroupNode struct {
+	Type               string          `json:"type"` // "relationship_group"
+	RelationshipID     string          `json:"relationship_id"`
+	RelatedEntityRules json.RawMessage `json:"related_entity_rules"` // Will be unmarshalled into a RuleGroup
+	// Optional: JoinType string `json:"join_type,omitempty"` // e.g., EXISTS, NOT_EXISTS, AT_LEAST_ONE_MATCH
+}
+
+// GenericRule is used to determine the type of a rule before full unmarshalling.
 type GenericRule struct {
 	Type string `json:"type"`
 }
+
+// RelationshipType defines the nature of the connection between two entities.
+// Mirrored from metadata/models.go for use by the grouping service.
+type RelationshipType string
+
+const (
+	OneToOne  RelationshipType = "ONE_TO_ONE"
+	OneToMany RelationshipType = "ONE_TO_MANY"
+	ManyToOne RelationshipType = "MANY_TO_ONE"
+)
+
+// EntityRelationshipDefinition defines how two entities are related.
+// Mirrored from metadata/models.go for use by the grouping service.
+type EntityRelationshipDefinition struct {
+	ID                string           `json:"id"`
+	Name              string           `json:"name"`
+	Description       string           `json:"description,omitempty"`
+	SourceEntityID    string           `json:"source_entity_id"`
+	SourceAttributeID string           `json:"source_attribute_id"`
+	TargetEntityID    string           `json:"target_entity_id"`
+	TargetAttributeID string           `json:"target_attribute_id"`
+	RelationshipType  RelationshipType `json:"relationship_type"`
+}
+
 
 // --- Metadata Service Client ---
 type MetadataServiceAPIClient interface {
 	GetGroupDefinition(groupID string) (*GroupDefinition, error)
 	GetEntityDefinition(entityID string) (*EntityDefinition, error)
 	GetAttributeDefinition(entityID string, attributeID string) (*AttributeDefinition, error)
+	GetEntityRelationship(relationshipID string) (*EntityRelationshipDefinition, error) // Added
 	ListWorkflows() ([]WorkflowDefinition, error)
 }
 type HTTPMetadataClient struct {
@@ -79,6 +119,12 @@ func (c *HTTPMetadataClient) ListWorkflows() ([]WorkflowDefinition, error) {
 	url := fmt.Sprintf("%s/api/v1/workflows", c.BaseURL)
 	err := c.fetchMetadata(url, &workflows)
 	return workflows, err
+}
+func (c *HTTPMetadataClient) GetEntityRelationship(relationshipID string) (*EntityRelationshipDefinition, error) {
+	var relDef EntityRelationshipDefinition
+	url := fmt.Sprintf("%s/api/v1/entity-relationships/%s", c.BaseURL, relationshipID)
+	err := c.fetchMetadata(url, &relDef)
+	return &relDef, err
 }
 
 // --- Orchestration Service Client ---
@@ -147,38 +193,197 @@ func NewGroupingService(metaClient MetadataServiceAPIClient, orchClient Orchestr
 		db:                  db,
 	}
 }
-func getAllAttributeIDsAndNamesRecursive(ruleGroup RuleGroup, attrInfoMap map[string]string) error {
+// getAllAttributeIDsAndNamesRecursive extracts all unique AttributeIDs, their names, and associated EntityIDs
+// from a rule group and its nested structures.
+// It populates attrInfoMap with AttributeID as key and AttributeName as value.
+// It also populates entityAttrMap with EntityID as key and a map of its AttributeIDs to AttributeNames.
+// It needs metadataClient to fetch relationship definitions if a relationship_group is encountered.
+// It also collects all relationship IDs found into relationshipIDsMap.
+func getAllAttributeIDsAndNamesRecursive(
+	ruleGroup RuleGroup,
+	attrInfoMap map[string]string, // AttributeID -> AttributeName
+	entityAttrMap map[string]map[string]string, // EntityID -> map[AttributeID]AttributeName
+	relationshipIDsMap map[string]bool, // Set of RelationshipIDs encountered
+	metadataClient MetadataServiceAPIClient, 
+	currentEntityIDForGroup string, 
+) error {
+	// If ruleGroup has its own EntityID, it defines the context for its direct children (conditions).
+	// If not, it inherits the context from its parent (currentEntityIDForGroup).
+	contextEntityID := currentEntityIDForGroup
+	if ruleGroup.EntityID != "" {
+		contextEntityID = ruleGroup.EntityID
+	}
+	if contextEntityID == "" {
+        return fmt.Errorf("cannot determine entity context for rule group processing: ruleGroup.EntityID is '%s' and currentEntityIDForGroup is '%s'", ruleGroup.EntityID, currentEntityIDForGroup)
+    }
+
+
 	for _, rawRule := range ruleGroup.Rules {
 		var genericRule GenericRule
-		if err := json.Unmarshal(rawRule, &genericRule); err != nil { return fmt.Errorf("failed to unmarshal generic rule: %w", err) }
+		if err := json.Unmarshal(rawRule, &genericRule); err != nil {
+			return fmt.Errorf("failed to unmarshal generic rule: %w", err)
+		}
+
 		switch genericRule.Type {
 		case "condition":
 			var condition RuleCondition
-			if err := json.Unmarshal(rawRule, &condition); err != nil { return fmt.Errorf("failed to unmarshal rule condition: %w", err) }
-			if condition.AttributeID == "" || condition.AttributeName == "" { return fmt.Errorf("condition found with empty AttributeID ('%s') or AttributeName ('%s')", condition.AttributeID, condition.AttributeName) }
-			attrInfoMap[condition.AttributeID] = condition.AttributeName
+			if err := json.Unmarshal(rawRule, &condition); err != nil {
+				return fmt.Errorf("failed to unmarshal rule condition: %w", err)
+			}
+			if condition.AttributeID == "" || condition.AttributeName == "" {
+				return fmt.Errorf("condition found with empty AttributeID ('%s') or AttributeName ('%s')", condition.AttributeID, condition.AttributeName)
+			}
+			
+			// Condition's own EntityID takes precedence. If not set, it uses the group's contextEntityID.
+			conditionOnEntityID := condition.EntityID
+			if conditionOnEntityID == "" {
+				conditionOnEntityID = contextEntityID
+			}
+			if conditionOnEntityID == "" { // Should be caught by contextEntityID check above, but as safeguard.
+                 return fmt.Errorf("condition for attribute '%s' is missing EntityID and parent group context also has no EntityID", condition.AttributeName)
+            }
+
+			attrInfoMap[condition.AttributeID] = condition.AttributeName // Store globally for name lookup
+			if _, ok := entityAttrMap[conditionOnEntityID]; !ok {
+				entityAttrMap[conditionOnEntityID] = make(map[string]string)
+			}
+			entityAttrMap[conditionOnEntityID][condition.AttributeID] = condition.AttributeName
+
 		case "group":
 			var nestedGroup RuleGroup
-			if err := json.Unmarshal(rawRule, &nestedGroup); err != nil { return fmt.Errorf("failed to unmarshal nested rule group: %w", err) }
-			if err := getAllAttributeIDsAndNamesRecursive(nestedGroup, attrInfoMap); err != nil { return err }
+			if err := json.Unmarshal(rawRule, &nestedGroup); err != nil {
+				return fmt.Errorf("failed to unmarshal nested rule group: %w", err)
+			}
+			// Nested group inherits contextEntityID if it doesn't define its own.
+			nestedGroupContextEntityID := nestedGroup.EntityID
+			if nestedGroupContextEntityID == "" {
+				nestedGroupContextEntityID = contextEntityID
+			}
+			if err := getAllAttributeIDsAndNamesRecursive(nestedGroup, attrInfoMap, entityAttrMap, relationshipIDsMap, metadataClient, nestedGroupContextEntityID); err != nil {
+				return err
+			}
+		
+		case "relationship_group":
+			var relGroupNode RelationshipGroupNode
+			if err := json.Unmarshal(rawRule, &relGroupNode); err != nil {
+				return fmt.Errorf("failed to unmarshal relationship_group node: %w", err)
+			}
+			if metadataClient == nil { // Should be ensured by the caller (CalculateGroup)
+				return fmt.Errorf("metadataClient is nil, cannot process relationship_group %s", relGroupNode.RelationshipID)
+			}
+			
+			relationshipIDsMap[relGroupNode.RelationshipID] = true // Collect relationship ID
+
+			// Temporarily fetch relationship here to know TargetEntityID for recursive call.
+			// Later, these will be pre-fetched in CalculateGroup.
+			relDef, err := metadataClient.GetEntityRelationship(relGroupNode.RelationshipID)
+			if err != nil {
+				return fmt.Errorf("failed to pre-fetch entity relationship %s for attribute collection: %w", relGroupNode.RelationshipID, err)
+			}
+			
+			// Attributes for join condition also need to be collected.
+			// Source attribute is on contextEntityID (or relDef.SourceEntityID if more precise)
+			// Target attribute is on relDef.TargetEntityID
+			attrInfoMap[relDef.SourceAttributeID] = "" // Name to be fetched later
+			if _, ok := entityAttrMap[relDef.SourceEntityID]; !ok { entityAttrMap[relDef.SourceEntityID] = make(map[string]string) }
+			entityAttrMap[relDef.SourceEntityID][relDef.SourceAttributeID] = ""
+
+			attrInfoMap[relDef.TargetAttributeID] = "" // Name to be fetched later
+			if _, ok := entityAttrMap[relDef.TargetEntityID]; !ok { entityAttrMap[relDef.TargetEntityID] = make(map[string]string) }
+			entityAttrMap[relDef.TargetEntityID][relDef.TargetAttributeID] = ""
+			
+			var relatedRulesGroup RuleGroup
+			if err := json.Unmarshal(relGroupNode.RelatedEntityRules, &relatedRulesGroup); err != nil {
+				return fmt.Errorf("failed to unmarshal related_entity_rules for relationship %s: %w", relGroupNode.RelationshipID, err)
+			}
+			
+			// The related_entity_rules operate on the TargetEntity of the relationship.
+			// If relatedRulesGroup.EntityID is specified, it MUST match relDef.TargetEntityID.
+			if relatedRulesGroup.EntityID != "" && relatedRulesGroup.EntityID != relDef.TargetEntityID {
+				return fmt.Errorf("relationship_group for rel %s: related_entity_rules has entity_id %s which does not match relationship target_entity_id %s", relGroupNode.RelationshipID, relatedRulesGroup.EntityID, relDef.TargetEntityID)
+			}
+			// Pass relDef.TargetEntityID as the context for the related rules.
+			if err := getAllAttributeIDsAndNamesRecursive(relatedRulesGroup, attrInfoMap, entityAttrMap, relationshipIDsMap, metadataClient, relDef.TargetEntityID); err != nil {
+				return err
+			}
+
 		default:
-			return fmt.Errorf("unknown rule type: %s", genericRule.Type)
+			return fmt.Errorf("unknown rule type: '%s' in rule group for entity '%s'", genericRule.Type, contextEntityID)
 		}
 	}
 	return nil
 }
-func buildWhereClauseRecursive(ruleGroup RuleGroup, attributeDefsMap map[string]*AttributeDefinition, params *[]interface{}, paramCounter *int) (string, error) {
+
+
+// buildWhereClauseRecursive constructs the SQL WHERE clause.
+// - ruleGroup: The current group of rules to process.
+// - attributeDefsMap: Pre-fetched map of AttributeID to AttributeDefinition for all relevant attributes.
+// - relationshipDefsMap: Pre-fetched map of RelationshipID to EntityRelationshipDefinition for all relevant relationships.
+// - params: Slice to append SQL parameters to.
+// - paramCounter: Pointer to the current SQL parameter placeholder number (e.g., $1, $2).
+// - currentTableAlias: The SQL alias for the processed_entities table relevant to this ruleGroup.
+// - aliasGenerator: A function or struct method to generate new unique table aliases for subqueries/joins.
+// - groupEntityID: The entity_id context for the current ruleGroup.
+// - metadataClient: Used to fetch relationship definitions if not pre-fetched.
+func buildWhereClauseRecursive(
+	ruleGroup RuleGroup,
+	attributeDefsMap map[string]*AttributeDefinition,
+	relationshipDefsMap map[string]*EntityRelationshipDefinition, 
+	params *[]interface{},
+	paramCounter *int,
+	currentTableAlias string, 
+	aliasGenerator func() string, 
+	groupEntityID string, // Entity context for this specific group.
+	metadataClient MetadataServiceAPIClient, // Needed if relationships are not pre-fetched.
+) (string, error) {
 	var conditions []string
+
+	if currentTableAlias == "" {
+		return "", fmt.Errorf("buildWhereClauseRecursive called with empty currentTableAlias for group with EntityID '%s'", groupEntityID)
+	}
+	// The entity_id for conditions directly under this group.
+	// If ruleGroup.EntityID is set, it defines the context. Otherwise, it inherits from groupEntityID.
+	contextualEntityID := groupEntityID
+	if ruleGroup.EntityID != "" {
+		contextualEntityID = ruleGroup.EntityID
+	}
+    if contextualEntityID == "" {
+        return "", fmt.Errorf("cannot determine entity context for rule group processing (ruleGroup.EntityID: '%s', groupEntityID: '%s')", ruleGroup.EntityID, groupEntityID)
+    }
+
+
 	for _, rawRule := range ruleGroup.Rules {
 		var genericRule GenericRule
-		if err := json.Unmarshal(rawRule, &genericRule); err != nil { return "", fmt.Errorf("failed to determine rule type: %w", err) }
+		if err := json.Unmarshal(rawRule, &genericRule); err != nil { return "", fmt.Errorf("failed to determine rule type from rawRule: %s, error: %w", string(rawRule), err) }
+
 		if genericRule.Type == "condition" {
 			var ruleCond RuleCondition
 			if err := json.Unmarshal(rawRule, &ruleCond); err != nil { return "", fmt.Errorf("failed to unmarshal condition: %w", err) }
+			
+			// Condition's EntityID field takes precedence. If empty, use the group's contextualEntityID.
+			conditionOnEntityID := ruleCond.EntityID
+			if conditionOnEntityID == "" {
+				conditionOnEntityID = contextualEntityID
+			}
+            if conditionOnEntityID != contextualEntityID {
+                 // This condition is trying to query an attribute from an entity (conditionOnEntityID)
+                 // that is different from the current group's context (contextualEntityID)
+                 // without being wrapped in a relationship_group. This is not allowed.
+                 return "", fmt.Errorf("condition for attribute '%s' (on EntityID '%s') found in a group context for EntityID '%s'. Cross-entity conditions must use 'relationship_group'.", ruleCond.AttributeName, conditionOnEntityID, contextualEntityID)
+            }
+
 			attrDef, ok := attributeDefsMap[ruleCond.AttributeID]
-			if !ok { return "", fmt.Errorf("attribute definition not found for ID: %s (Name: %s)", ruleCond.AttributeID, ruleCond.AttributeName) }
-			valueType := ruleCond.ValueType; if valueType == "" { valueType = attrDef.DataType }
-			fieldAccessor := fmt.Sprintf("(attributes->>'%s')", ruleCond.AttributeName)
+			if !ok {
+				return "", fmt.Errorf("attribute definition not found for ID: '%s' (Name: '%s', EntityID: '%s')", ruleCond.AttributeID, ruleCond.AttributeName, conditionOnEntityID)
+			}
+			if attrDef.EntityID != conditionOnEntityID { // Sanity check
+                 return "", fmt.Errorf("attribute definition mismatch: attrDef.EntityID ('%s') != conditionOnEntityID ('%s') for attribute '%s'", attrDef.EntityID, conditionOnEntityID, attrDef.Name)
+            }
+
+			valueType := ruleCond.ValueType
+			if valueType == "" { valueType = attrDef.DataType } 
+
+			fieldAccessor := fmt.Sprintf("(%s.attributes->>'%s')", currentTableAlias, ruleCond.AttributeName)
 			var castSuffix string
 			switch strings.ToLower(valueType) {
 			case "integer", "long": castSuffix = "::bigint"
@@ -209,18 +414,102 @@ func buildWhereClauseRecursive(ruleGroup RuleGroup, attributeDefsMap map[string]
 				conditionStr = fmt.Sprintf("%s%s %s (%s)", fieldAccessor, castSuffix, strings.ToUpper(op), strings.Join(placeholders, ", "))
 			case "is null", "is_null": conditionStr = fmt.Sprintf("%s IS NULL", fieldAccessor)
 			case "is not null", "is_not_null": conditionStr = fmt.Sprintf("%s IS NOT NULL", fieldAccessor)
-			default: return "", fmt.Errorf("unsupported operator: %s", ruleCond.Operator)
+			default: return "", fmt.Errorf("unsupported operator: '%s' for attribute '%s'", ruleCond.Operator, ruleCond.AttributeName)
 			}
 			conditions = append(conditions, conditionStr)
+
 		} else if genericRule.Type == "group" {
-			var nestedGroup RuleGroup
-			if err := json.Unmarshal(rawRule, &nestedGroup); err != nil { return "", fmt.Errorf("failed to unmarshal nested group: %w", err) }
-			nestedSQL, err := buildWhereClauseRecursive(nestedGroup, attributeDefsMap, params, paramCounter); if err != nil { return "", err }
+			var nestedRuleGroup RuleGroup
+			if err := json.Unmarshal(rawRule, &nestedRuleGroup); err != nil { return "", fmt.Errorf("failed to unmarshal nested group: %w", err) }
+			
+			// Nested group inherits currentTableAlias and contextualEntityID if it doesn't specify its own EntityID.
+			// If nestedRuleGroup.EntityID is different, it implies a change of entity context NOT via a relationship.
+			// This should ideally be an error or handled very carefully. For now, assume simple nesting on same entity context.
+			nestedGroupEntityID := nestedRuleGroup.EntityID
+			if nestedGroupEntityID == "" {
+				nestedGroupEntityID = contextualEntityID
+			}
+			if nestedGroupEntityID != contextualEntityID {
+				return "", fmt.Errorf("nested group has EntityID '%s' different from parent context '%s' without 'relationship_group'", nestedGroupEntityID, contextualEntityID)
+			}
+
+			// Recursive call for a standard nested group. It operates on the same currentTableAlias.
+			nestedSQL, err := buildWhereClauseRecursive(nestedRuleGroup, attributeDefsMap, relationshipDefsMap, params, paramCounter, currentTableAlias, aliasGenerator, nestedGroupEntityID, metadataClient)
+			if err != nil { return "", err }
 			if nestedSQL != "" { conditions = append(conditions, fmt.Sprintf("(%s)", nestedSQL)) }
-		} else { return "", fmt.Errorf("unknown rule type: '%s'", genericRule.Type) }
+		
+		} else if genericRule.Type == "relationship_group" {
+			var relGroupNode RelationshipGroupNode
+			if err := json.Unmarshal(rawRule, &relGroupNode); err != nil { return "", fmt.Errorf("failed to unmarshal relationship_group node: %w", err) }
+
+			relDef, ok := relationshipDefsMap[relGroupNode.RelationshipID]
+			if !ok {
+				// Attempt to fetch if not in map (should ideally be pre-fetched by CalculateGroup)
+				fetchedRelDef, err := metadataClient.GetEntityRelationship(relGroupNode.RelationshipID)
+				if err != nil {
+					return "", fmt.Errorf("relationship definition %s not found and failed to fetch: %w", relGroupNode.RelationshipID, err)
+				}
+				relDef = fetchedRelDef
+				relationshipDefsMap[relGroupNode.RelationshipID] = fetchedRelDef // Cache it
+			}
+
+			// Validate relationship is applicable
+			if relDef.SourceEntityID != contextualEntityID { // Current group's entity must be the source of the relationship
+				return "", fmt.Errorf("relationship %s (source: %s) cannot originate from group with entity context %s", relDef.ID, relDef.SourceEntityID, contextualEntityID)
+			}
+
+			sourceAttr, okSA := attributeDefsMap[relDef.SourceAttributeID]
+			targetAttr, okTA := attributeDefsMap[relDef.TargetAttributeID]
+			if !okSA || !okTA {
+				return "", fmt.Errorf("source ('%s') or target ('%s') attribute definition for relationship %s not found in attributeDefsMap", relDef.SourceAttributeID, relDef.TargetAttributeID, relDef.ID)
+			}
+
+			relatedTableAlias := aliasGenerator() // Generate a new alias for the related entity table, e.g., "pe2"
+			
+			var relatedActualRuleGroup RuleGroup
+			if err := json.Unmarshal(relGroupNode.RelatedEntityRules, &relatedActualRuleGroup); err != nil {
+				return "", fmt.Errorf("failed to unmarshal related_entity_rules for relationship %s: %w", relGroupNode.RelationshipID, err)
+			}
+			// Ensure the related rules group is for the target entity of the relationship
+			if relatedActualRuleGroup.EntityID != "" && relatedActualRuleGroup.EntityID != relDef.TargetEntityID {
+                 return "", fmt.Errorf("related_entity_rules for relationship %s has EntityID '%s' which does not match relationship's TargetEntityID '%s'", relGroupNode.RelationshipID, relatedActualRuleGroup.EntityID, relDef.TargetEntityID)
+            }
+
+
+			// Recursively build WHERE clause for the related entity's rules
+			// This clause will apply to 'relatedTableAlias'
+			relatedWhereClause, err := buildWhereClauseRecursive(relatedActualRuleGroup, attributeDefsMap, relationshipDefsMap, params, paramCounter, relatedTableAlias, aliasGenerator, relDef.TargetEntityID, metadataClient)
+			if err != nil { return "", fmt.Errorf("failed to build WHERE clause for related entity (rel: %s): %w", relDef.ID, err) }
+
+			// Construct the EXISTS subquery
+			// Example: AND EXISTS (SELECT 1 FROM processed_entities pe2 WHERE pe2.entity_definition_id = $N AND (pe1.attributes->>'fk_attr') = (pe2.attributes->>'pk_attr') AND (related_conditions_on_pe2))
+			var subQuery strings.Builder
+			subQuery.WriteString(fmt.Sprintf("EXISTS (SELECT 1 FROM processed_entities %s WHERE %s.entity_definition_id = $%d", relatedTableAlias, relatedTableAlias, *paramCounter))
+			*params = append(*params, relDef.TargetEntityID) // Parameter for target_entity_id
+			*paramCounter++
+			
+			// Join condition using attributes from the relationship
+			// (currentTableAlias.attributes->>'SourceAttributeName') = (relatedTableAlias.attributes->>'TargetAttributeName')
+			subQuery.WriteString(fmt.Sprintf(" AND (%s.attributes->>'%s') = (%s.attributes->>'%s')", currentTableAlias, sourceAttr.Name, relatedTableAlias, targetAttr.Name))
+
+			if relatedWhereClause != "" {
+				subQuery.WriteString(fmt.Sprintf(" AND (%s)", relatedWhereClause))
+			}
+			subQuery.WriteString(")")
+			conditions = append(conditions, subQuery.String())
+
+		} else { 
+			return "", fmt.Errorf("unknown rule type: '%s' in group for EntityID '%s'", genericRule.Type, contextualEntityID)
+		}
 	}
-	if len(conditions) == 0 { return "", nil }
-	return strings.Join(conditions, " "+strings.ToUpper(ruleGroup.Condition)+" "), nil
+
+	if len(conditions) == 0 { return "", nil } 
+	
+	logicalOp := " AND " 
+	if ruleGroup.LogicalOperator != "" {
+		logicalOp = " " + strings.ToUpper(ruleGroup.LogicalOperator) + " "
+	}
+	return strings.Join(conditions, logicalOp), nil
 }
 
 func (s *GroupingService) upsertGroupCalculationLog(tx *sql.Tx, groupID, entityDefID, status string, memberCount int, errorMsg sql.NullString) error {
@@ -275,43 +564,250 @@ func (s *GroupingService) CalculateGroup(groupID string) ([]string, error) {
 		return nil, fmt.Errorf("failed to clear previous members for group %s: %w", groupID, err)
 	}
 
-	// Parse RulesJSON, fetch attributes, build and execute query (existing logic)
+	// Parse RulesJSON
 	var topRuleGroup RuleGroup
-	if err := json.Unmarshal([]byte(groupDef.RulesJSON), &topRuleGroup); err != nil { /* ... error handling ... */ return nil, fmt.Errorf("failed to unmarshal RulesJSON for group %s: %w", groupID, err) }
-	if topRuleGroup.Type != "group" && topRuleGroup.Type != "" {
-		var singleCondition RuleCondition
-		if errJ := json.Unmarshal([]byte(groupDef.RulesJSON), &singleCondition); errJ == nil && singleCondition.Type == "condition" {
-			topRuleGroup = RuleGroup{Type: "group", Condition: "AND", Rules: []json.RawMessage{json.RawMessage(groupDef.RulesJSON)}}
-		} else {
-			if topRuleGroup.Condition == "" { return nil, fmt.Errorf("top-level rule group for group %s is missing 'condition'", groupID) }
-			return nil, fmt.Errorf("invalid RulesJSON structure for group %s", groupID)
-		}
-	} else if topRuleGroup.Type == "" { topRuleGroup.Type = "group"; if topRuleGroup.Condition == "" { topRuleGroup.Condition = "AND" } }
+	if err := json.Unmarshal([]byte(groupDef.RulesJSON), &topRuleGroup); err != nil {
+		errMsg := fmt.Sprintf("failed to unmarshal RulesJSON for group %s: %w. Content: %s", groupID, err, groupDef.RulesJSON)
+		// Log and commit failure, then return
+		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		_ = tx.Commit()
+		return nil, fmt.Errorf(errMsg)
+	}
 
-	attrInfoMap := make(map[string]string)
-	if err := getAllAttributeIDsAndNamesRecursive(topRuleGroup, attrInfoMap); err != nil { /* ... error handling ... */ return nil, fmt.Errorf("failed to extract attributes: %w", err) }
-	attributeDefsMap := make(map[string]*AttributeDefinition)
-	if len(attrInfoMap) > 0 {
-		for attrID := range attrInfoMap {
-			attrDef, errA := s.metadataClient.GetAttributeDefinition(groupDef.EntityID, attrID)
-			if errA != nil { /* ... error handling ... */ return nil, fmt.Errorf("failed to get attr def %s: %w", attrID, errA) }
-			attributeDefsMap[attrID] = attrDef
+	// Validate topRuleGroup structure
+	if topRuleGroup.Type != "group" {
+		// This specific handling for a single top-level condition might need review
+		// if the standard is that RulesJSON root MUST be a group object.
+		// For now, assuming this wrapping is a desired flexibility.
+		var singleCond RuleCondition
+		if errUnmarshalCond := json.Unmarshal([]byte(groupDef.RulesJSON), &singleCond); errUnmarshalCond == nil && singleCond.AttributeID != "" {
+			log.Printf("Top-level rule for group %s is a single condition. Wrapping it in a default AND group.", groupID)
+			topRuleGroup = RuleGroup{
+				Type:            "group",
+				EntityID:        groupDef.EntityID, // Inherit group's primary entity ID
+				LogicalOperator: "AND",
+				Rules:           []json.RawMessage{json.RawMessage(groupDef.RulesJSON)},
+			}
+		} else {
+			errMsg := fmt.Sprintf("invalid RulesJSON for group %s: top-level 'type' must be 'group' or a single valid condition. Got: %s", groupID, groupDef.RulesJSON)
+			_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+			_ = tx.Commit()
+			return nil, fmt.Errorf(errMsg)
 		}
 	}
-	var params []interface{}; paramCounter := 1
-	params = append(params, groupDef.EntityID); paramCounter++
-	whereClause, err := buildWhereClauseRecursive(topRuleGroup, attributeDefsMap, &params, &paramCounter)
-	if err != nil { /* ... error handling ... */ return nil, fmt.Errorf("failed to build WHERE clause: %w", err) }
+	
+	// Ensure topRuleGroup has an EntityID, default to groupDef.EntityID if not specified in JSON
+	if topRuleGroup.EntityID == "" {
+		log.Printf("Top-level rule group for group %s is missing 'entity_id', defaulting to group's primary EntityID: %s", groupID, groupDef.EntityID)
+		topRuleGroup.EntityID = groupDef.EntityID
+	} else if topRuleGroup.EntityID != groupDef.EntityID {
+		// This is a critical mismatch. The group definition's entity_id should be the source of truth for the primary entity.
+		errMsg := fmt.Sprintf("mismatch: GroupDefinition.EntityID ('%s') and RulesJSON root EntityID ('%s') for group %s. Using GroupDefinition.EntityID.", groupDef.EntityID, topRuleGroup.EntityID, groupID)
+		log.Println(errMsg) // Log this, but proceed with groupDef.EntityID as the primary.
+		topRuleGroup.EntityID = groupDef.EntityID 
+		// Potentially, this could be an error state:
+		// _ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		// _ = tx.Commit()
+		// return nil, fmt.Errorf(errMsg)
+	}
+
+
+	if topRuleGroup.LogicalOperator == "" && len(topRuleGroup.Rules) > 1 {
+		errMsg := fmt.Sprintf("invalid RulesJSON for group %s: top-level 'logical_operator' is required when multiple rules exist. Rules: %s", groupID, groupDef.RulesJSON)
+		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		_ = tx.Commit()
+		return nil, fmt.Errorf(errMsg)
+	} else if topRuleGroup.LogicalOperator == "" { // Covers len(rules) <= 1
+		topRuleGroup.LogicalOperator = "AND" // Default for single or no rule
+	}
+
+	attrInfoMap := make(map[string]string)             // AttributeID -> AttributeName
+	entityAttrMap := make(map[string]map[string]string) // EntityID -> map[AttributeID]AttributeName
+	
+	attrInfoMap := make(map[string]string)                 // AttributeID -> AttributeName
+	entityAttrMap := make(map[string]map[string]string)     // EntityID -> map[AttributeID]AttributeName
+	relationshipIDsMap := make(map[string]bool)             // Set of RelationshipIDs
+
+	// Extract all attribute and entity information from the rule structure
+	if err := getAllAttributeIDsAndNamesRecursive(topRuleGroup, attrInfoMap, entityAttrMap, relationshipIDsMap, s.metadataClient, topRuleGroup.EntityID); err != nil {
+		errMsg := fmt.Sprintf("failed to extract attribute, entity, and relationship info from rules for group %s: %w. Rules: %s", groupID, err, groupDef.RulesJSON)
+		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		_ = tx.Commit()
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	attributeDefsMap := make(map[string]*AttributeDefinition)
+	// Fetch all unique AttributeDefinitions
+	for entityIDCtx, attrsInEntity := range entityAttrMap {
+		for attrID := range attrsInEntity {
+			if _, ok := attributeDefsMap[attrID]; !ok { // Fetch only if not already fetched
+				attrDef, errA := s.metadataClient.GetAttributeDefinition(entityIDCtx, attrID)
+				if errA != nil {
+					errMsg := fmt.Sprintf("failed to get attribute definition for ID %s (EntityID %s) for group %s: %w", attrID, entityIDCtx, groupID, errA)
+					_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+					_ = tx.Commit()
+					return nil, fmt.Errorf(errMsg)
+				}
+				attributeDefsMap[attrID] = attrDef
+			}
+		}
+	}
+	
+	relationshipDefsMap := make(map[string]*EntityRelationshipDefinition)
+	// Fetch all unique EntityRelationshipDefinitions
+	for relID := range relationshipIDsMap {
+		relDef, errR := s.metadataClient.GetEntityRelationship(relID)
+		if errR != nil {
+			errMsg := fmt.Sprintf("failed to get entity relationship definition for ID %s for group %s: %w", relID, groupID, errR)
+			_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+			_ = tx.Commit()
+			return nil, fmt.Errorf(errMsg)
+		}
+		relationshipDefsMap[relID] = relDef
+	}
+
+
+	// SQL Construction
+	tableAliasCounter := 0
+	generateAlias := func() string {
+		tableAliasCounter++
+		return fmt.Sprintf("pe%d", tableAliasCounter)
+	}
+	primaryTableAlias := generateAlias() // e.g., "pe1"
+
+	var queryParams []interface{} // Renamed from whereClauseParams for clarity
+	paramCounter := 1            // Renamed from whereClauseParamCounter
+
+	// The primary entity for the query is topRuleGroup.EntityID
+	// Pass s.metadataClient in case buildWhereClauseRecursive needs to fetch relationships not caught by getAll... (ideally shouldn't happen)
+	whereClause, err := buildWhereClauseRecursive(topRuleGroup, attributeDefsMap, relationshipDefsMap, &queryParams, &paramCounter, primaryTableAlias, generateAlias, topRuleGroup.EntityID, s.metadataClient)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to build WHERE clause for group %s: %w. Rules: %s", groupID, err, groupDef.RulesJSON)
+		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		_ = tx.Commit()
+		return nil, fmt.Errorf(errMsg)
+	}
 
 	var finalQuery strings.Builder
-	finalQuery.WriteString("SELECT id FROM processed_entities WHERE entity_definition_id = $1")
-	if whereClause != "" { finalQuery.WriteString(fmt.Sprintf(" AND (%s)", whereClause)) }
-	sqlQueryStr := finalQuery.String()
-	log.Printf("Executing member query for group %s: %s with params %v", groupID, sqlQueryStr, params)
+	// Primary query selects from the aliased primary entity table
+	finalQuery.WriteString(fmt.Sprintf("SELECT %s.id FROM processed_entities %s", primaryTableAlias, primaryTableAlias))
+	
+	// Start building the WHERE clause for the main query
+	mainWhereConditions := []string{}
+	finalParams := []interface{}{} // Parameters for the final composed query
 
-	rows, err := s.db.Query(sqlQueryStr, params...) // Query using s.db, not tx, for read-only part if possible, or use tx if required
+	// 1. Add primary entity ID filter for the main table
+	mainWhereConditions = append(mainWhereConditions, fmt.Sprintf("%s.entity_definition_id = $%d", primaryTableAlias, len(finalParams)+1))
+	finalParams = append(finalParams, topRuleGroup.EntityID)
+	
+	// 2. Add the generated whereClause (which contains conditions and subqueries)
+	if whereClause != "" {
+		// The parameters for 'whereClause' are already in 'queryParams'.
+		// We need to adjust their placeholder numbers ($N) to follow the primary entity_id param.
+		// Or, more simply, pass finalParams directly to buildWhereClauseRecursive and let it append.
+		// For now, let's re-evaluate the param strategy for buildWhereClauseRecursive.
+		// Let's assume buildWhereClauseRecursive populates queryParams starting from $1.
+		// We will prepend primary entity_id to queryParams before execution.
+
+		// Simpler approach: buildWhereClauseRecursive uses its own paramCounter starting from 1.
+		// The main entity_definition_id filter is added *after* the recursive call returns.
+		// So, the main query params will be [topRuleGroup.EntityID, ...queryParams].
+		// The $N placeholders in whereClause are already correct relative to queryParams.
+		// The placeholder for topRuleGroup.EntityID needs to be managed.
+
+		// Revised strategy:
+		// queryParams will hold all parameters.
+		// buildWhereClauseRecursive will use paramCounter to add its params.
+		// The primary entity_id filter will also use paramCounter.
+
+		// Let's reset and build finalParams and mainWhereConditions carefully.
+		finalParams = []interface{}{} // Reset
+		paramCounter = 1 // Reset for the whole query construction
+		mainWhereConditions = []string{}
+		
+		// Add primary entity_id filter first
+		mainWhereConditions = append(mainWhereConditions, fmt.Sprintf("%s.entity_definition_id = $%d", primaryTableAlias, paramCounter))
+		finalParams = append(finalParams, topRuleGroup.EntityID)
+		paramCounter++
+
+		// Now, build the complex WHERE clause, passing the *current* finalParams and paramCounter
+		// This means buildWhereClauseRecursive will append to finalParams and increment paramCounter.
+		// This is a change from its previous independent parameter management.
+		// Let's revert buildWhereClauseRecursive to manage its own params and paramCounter starting from 1.
+		// Then we combine them. This is cleaner.
+
+		// whereClauseParams and whereClauseParamCounter are used by buildWhereClauseRecursive.
+		// Let's rename them back for clarity with the previous step's logic for buildWhereClauseRecursive.
+		// whereClauseParams was already populated by buildWhereClauseRecursive.
+		// The parameters for whereClause are already in queryParams.
+		
+		if whereClause != "" {
+			mainWhereConditions = append(mainWhereConditions, fmt.Sprintf("(%s)", whereClause))
+		}
+	}
+	
+	if len(mainWhereConditions) > 0 {
+		finalQuery.WriteString(" WHERE ")
+		finalQuery.WriteString(strings.Join(mainWhereConditions, " AND "))
+	}
+
+	// Combine parameters: primary entity ID first, then those from the recursive WHERE clause.
+	// This assumes buildWhereClauseRecursive populates `queryParams` with placeholders starting $1, $2...
+	// And the main `entity_definition_id` filter also needs a placeholder.
+	
+	// Corrected parameter combination:
+	// The main query's entity_id filter is $1.
+	// Parameters for whereClause (from queryParams) should be shifted.
+	// Example: If whereClause was "col = $1", it becomes "col = $2"
+	// This is complex. A simpler way:
+	// finalParams starts with topRuleGroup.EntityID. buildWhereClauseRecursive appends to it.
+	// Let's modify buildWhereClauseRecursive to append to the passed 'params' and update 'paramCounter'.
+	// This was the strategy in the previous diff for buildWhereClauseRecursive. I'll stick to that.
+
+	// Re-instating the logic from previous diff for params:
+	// finalParams will be built by adding topRuleGroup.EntityID, then whereClauseParams.
+	// The $N placeholders in whereClause must be adjusted.
+	// This is getting complicated. Let's simplify:
+	// paramCounter is global for the whole query.
+	// buildWhereClauseRecursive appends to `finalParams` and increments `paramCounter`.
+
+	// Resetting finalParams and paramCounter for the entire query generation.
+	finalParams = []interface{}{}
+	paramCounter = 1 
+
+	finalQuery = strings.Builder{} // Reset builder
+	finalQuery.WriteString(fmt.Sprintf("SELECT %s.id FROM processed_entities %s", primaryTableAlias, primaryTableAlias))
+	
+	var actualWhereConditions []string
+	// Primary entity filter
+	actualWhereConditions = append(actualWhereConditions, fmt.Sprintf("%s.entity_definition_id = $%d", primaryTableAlias, paramCounter))
+	finalParams = append(finalParams, topRuleGroup.EntityID)
+	paramCounter++
+
+	// Build the rest of the WHERE clause.
+	// buildWhereClauseRecursive will now append to finalParams and use/update paramCounter.
+	recursiveWhereClause, err := buildWhereClauseRecursive(topRuleGroup, attributeDefsMap, relationshipDefsMap, &finalParams, &paramCounter, primaryTableAlias, generateAlias, topRuleGroup.EntityID, s.metadataClient)
 	if err != nil {
-		errMsg := fmt.Sprintf("failed to execute member query for group %s: %v. Query: %s, Params: %v", groupID, err, sqlQueryStr, params)
+		errMsg := fmt.Sprintf("failed to build WHERE clause for group %s: %w. Rules: %s", groupID, err, groupDef.RulesJSON)
+		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
+		_ = tx.Commit()
+		return nil, fmt.Errorf(errMsg)
+	}
+	if recursiveWhereClause != "" {
+		actualWhereConditions = append(actualWhereConditions, fmt.Sprintf("(%s)", recursiveWhereClause))
+	}
+
+	if len(actualWhereConditions) > 0 {
+		finalQuery.WriteString(" WHERE " + strings.Join(actualWhereConditions, " AND "))
+	}
+
+	sqlQueryStr := finalQuery.String()
+	log.Printf("Executing member query for group %s: %s with params %v", groupID, sqlQueryStr, finalParams)
+
+	// Use tx for the query, as the entire operation should be atomic.
+	rows, err := tx.Query(sqlQueryStr, finalParams...)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to execute member query for group %s: %v. Query: %s, Params: %v", groupID, err, sqlQueryStr, finalParams)
 		_ = s.upsertGroupCalculationLog(tx, groupDef.ID, groupDef.EntityID, "FAILED", 0, sql.NullString{String: errMsg, Valid: true})
 		_ = tx.Commit() // Commit failure status
 		return nil, fmt.Errorf(errMsg)

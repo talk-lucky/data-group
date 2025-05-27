@@ -135,6 +135,23 @@ const routes = [
     component: () => import('@/views/WorkflowDetailView.vue'),
     props: true
   },
+  // Entity Relationship Routes
+  {
+    path: '/entity-relationships',
+    name: 'EntityRelationshipList',
+    component: () => import('@/views/EntityRelationshipListView.vue') 
+  },
+  {
+    path: '/entity-relationships/new',
+    name: 'EntityRelationshipCreate',
+    component: () => import('@/views/EntityRelationshipCreateView.vue')
+  },
+  {
+    path: '/entity-relationships/:id/edit',
+    name: 'EntityRelationshipEdit',
+    component: () => import('@/views/EntityRelationshipEditView.vue'),
+    props: true
+  },
   // Fallback route for 404
   {
     path: '/:catchAll(.*)',

@@ -149,6 +149,25 @@ func (s *PostgresStore) initSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_sd_name ON schedule_definitions(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_sd_task_type ON schedule_definitions(task_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_sd_is_enabled ON schedule_definitions(is_enabled)`,
+
+		`CREATE TABLE IF NOT EXISTS entity_relationship_definitions (
+			id TEXT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			source_entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
+			source_attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
+			target_entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
+			target_attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
+			relationship_type VARCHAR(50) NOT NULL, -- ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (name, source_entity_id, target_entity_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_er_source_entity_id ON entity_relationship_definitions(source_entity_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_er_target_entity_id ON entity_relationship_definitions(target_entity_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_er_source_attribute_id ON entity_relationship_definitions(source_attribute_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_er_target_attribute_id ON entity_relationship_definitions(target_attribute_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_er_relationship_type ON entity_relationship_definitions(relationship_type)`,
 	}
 
 	for _, stmt := range schemaStatements {
@@ -243,6 +262,141 @@ func (s *PostgresStore) DeleteEntity(id string) error {
 	}
 	if rowsAffected == 0 {
 		return sql.ErrNoRows // Or a custom "not found" error
+	}
+	return nil
+}
+
+// --- EntityRelationshipDefinition Methods ---
+
+func (s *PostgresStore) CreateEntityRelationship(def EntityRelationshipDefinition) (EntityRelationshipDefinition, error) {
+	now := time.Now().UTC()
+	if def.ID == "" {
+		def.ID = uuid.NewString()
+	}
+	def.CreatedAt = now
+	def.UpdatedAt = now
+
+	query := `INSERT INTO entity_relationship_definitions 
+              (id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), def.CreatedAt, def.UpdatedAt)
+	if err != nil {
+		return EntityRelationshipDefinition{}, fmt.Errorf("CreateEntityRelationship failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) GetEntityRelationship(id string) (EntityRelationshipDefinition, error) {
+	var def EntityRelationshipDefinition
+	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+              FROM entity_relationship_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(
+		&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EntityRelationshipDefinition{}, sql.ErrNoRows
+		}
+		return EntityRelationshipDefinition{}, fmt.Errorf("GetEntityRelationship failed: %w", err)
+	}
+	return def, nil
+}
+
+func (s *PostgresStore) GetEntityRelationshipsBySourceEntity(sourceEntityID string) ([]EntityRelationshipDefinition, error) {
+	var defs []EntityRelationshipDefinition
+	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+              FROM entity_relationship_definitions WHERE source_entity_id = $1 ORDER BY name`
+	rows, err := s.DB.Query(query, sourceEntityID)
+	if err != nil {
+		return nil, fmt.Errorf("GetEntityRelationshipsBySourceEntity failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var def EntityRelationshipDefinition
+		if err := rows.Scan(
+			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("GetEntityRelationshipsBySourceEntity row scan failed: %w", err)
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetEntityRelationshipsBySourceEntity rows iteration error: %w", err)
+	}
+	return defs, nil
+}
+
+func (s *PostgresStore) ListEntityRelationships(offset, limit int) ([]EntityRelationshipDefinition, int64, error) {
+	var defs []EntityRelationshipDefinition
+	
+	countQuery := `SELECT COUNT(*) FROM entity_relationship_definitions`
+	var totalCount int64
+	err := s.DB.QueryRow(countQuery).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListEntityRelationships count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []EntityRelationshipDefinition{}, 0, nil
+	}
+	
+	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+              FROM entity_relationship_definitions ORDER BY name LIMIT $1 OFFSET $2`
+	rows, err := s.DB.Query(query, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListEntityRelationships query failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var def EntityRelationshipDefinition
+		if err := rows.Scan(
+			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("ListEntityRelationships row scan failed: %w", err)
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("ListEntityRelationships rows iteration error: %w", err)
+	}
+	return defs, totalCount, nil
+}
+
+
+func (s *PostgresStore) UpdateEntityRelationship(id string, def EntityRelationshipDefinition) (EntityRelationshipDefinition, error) {
+	now := time.Now().UTC()
+	def.UpdatedAt = now
+	def.ID = id // Ensure ID is the one from path param
+
+	query := `UPDATE entity_relationship_definitions 
+              SET name = $1, description = $2, source_entity_id = $3, source_attribute_id = $4, target_entity_id = $5, target_attribute_id = $6, relationship_type = $7, updated_at = $8 
+              WHERE id = $9
+              RETURNING id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at`
+	var updatedDef EntityRelationshipDefinition
+	err := s.DB.QueryRow(query, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.SourceEntityID, &updatedDef.SourceAttributeID, &updatedDef.TargetEntityID, &updatedDef.TargetAttributeID, &updatedDef.RelationshipType, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EntityRelationshipDefinition{}, sql.ErrNoRows
+		}
+		return EntityRelationshipDefinition{}, fmt.Errorf("UpdateEntityRelationship failed: %w", err)
+	}
+	return updatedDef, nil
+}
+
+func (s *PostgresStore) DeleteEntityRelationship(id string) error {
+	query := `DELETE FROM entity_relationship_definitions WHERE id = $1`
+	result, err := s.DB.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("DeleteEntityRelationship failed: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("DeleteEntityRelationship failed to get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }

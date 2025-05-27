@@ -62,34 +62,43 @@ func clearAllTables(store *PostgresStore) error {
 	tables := []string{
 		// Order might matter if not using CASCADE, but with CASCADE it's more flexible.
 		// Start with tables that are referenced by others if not using CASCADE.
-		// With CASCADE, the order is less strict, but it's good practice to be mindful.
+		// Order: Start with tables that are referenced by others, or use CASCADE judiciously.
+		// With RESTART IDENTITY CASCADE, the order is less critical for cleaning,
+		// but for initial schema creation, dependent tables come after their references.
+		"entity_relationship_definitions", // Depends on entities and attributes
+		"data_source_field_mappings",    // Depends on data_sources, entities, attributes
+		"group_definitions",             // Depends on entities
+		"attribute_definitions",         // Depends on entities
+		"schedule_definitions",          // May depend on other items via task_parameters
+		"workflow_definitions",          // May depend on other items via trigger_config/action_sequence
 		"action_templates",
-		"workflow_definitions",
-		"group_definitions",
-		"data_source_field_mappings",
-		"schedule_definitions", // Added schedule_definitions
-		"action_templates",
-		"workflow_definitions",
-		"group_definitions",
-		"data_source_field_mappings",
-		"data_source_configs",
-		"attribute_definitions",
-		"entity_definitions",
+		"data_source_configs",           // May depend on entities
+		"entity_definitions",            // Base table
 	}
 
+	tx, err := store.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for clearing tables: %w", err)
+	}
+	defer tx.Rollback()
+
 	for _, table := range tables {
-		// Using TRUNCATE ... RESTART IDENTITY CASCADE to ensure clean slate and reset sequences.
-		// CASCADE will also handle dependent tables if any were missed or order was wrong.
 		query := fmt.Sprintf("TRUNCATE TABLE %s RESTART IDENTITY CASCADE;", table)
-		_, err := store.DB.Exec(query)
+		_, err := tx.Exec(query)
 		if err != nil {
-			// Log error but attempt to continue cleaning other tables.
-			log.Printf("Failed to truncate table %s: %v. This might be okay if the table doesn't exist yet on first run or due to CASCADE.", table, err)
-			// If a table doesn't exist (e.g. schema not fully up on first error), pq will error.
-			// We can check for specific pq error codes if we want to be more granular.
+			// Check if the error is "table does not exist" (PostgreSQL specific error code: 42P01)
+			// SQLite error for "no such table" is different.
+			// Since we are targeting PostgreSQL for the actual store, this check is more relevant for PG.
+			// For a generic approach, one might need to be less strict or have DB-specific error handling.
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "42P01" {
+				log.Printf("Table %s does not exist, skipping truncation. This is normal on initial schema setup.", table)
+				continue // Table might not exist yet if initSchema failed before creating all tables
+			}
+			// For other errors, it's more serious
+			return fmt.Errorf("failed to truncate table %s: %w", table, err)
 		}
 	}
-	return nil // Return nil as we log errors but try to continue. A single failure might not be fatal for all tests.
+	return tx.Commit()
 }
 
 // TestMain sets up the test database and router once for all tests in the package.
@@ -184,6 +193,206 @@ func TestUpdateEntityHandler(t *testing.T) {
 	assert.True(t, entity.UpdatedAt.After(createdEntity.UpdatedAt))
 
 	w = performRequest(testRouter, "PUT", "/api/v1/entities/nonexistent-id", strings.NewReader(payload), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+
+// --- EntityRelationshipDefinition Handler Tests ---
+
+// seedEntityRelationshipTestData creates prerequisite entities and attributes for relationship tests.
+// Returns: userEntity, userPkAttr, postEntity, postUserFkAttr
+func seedEntityRelationshipTestData(t *testing.T) (EntityDefinition, AttributeDefinition, EntityDefinition, AttributeDefinition) {
+	t.Helper()
+	userEntity, err := testStore.CreateEntity("User ER Test", "User entity for ER tests")
+	require.NoError(t, err)
+	userPkAttr, err := testStore.CreateAttribute(userEntity.ID, "id", "uuid", "User PK", true, false, true)
+	require.NoError(t, err)
+
+	postEntity, err := testStore.CreateEntity("Post ER Test", "Post entity for ER tests")
+	require.NoError(t, err)
+	postUserFkAttr, err := testStore.CreateAttribute(postEntity.ID, "user_id", "uuid", "Post FK to User", true, false, true)
+	require.NoError(t, err)
+	
+	// Also create a PK for Post entity to allow it to be a source in some relationships
+	_, err = testStore.CreateAttribute(postEntity.ID, "id", "uuid", "Post PK", true, false, true)
+	require.NoError(t, err)
+
+
+	return userEntity, userPkAttr, postEntity, postUserFkAttr
+}
+
+func TestCreateEntityRelationshipHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before ER test")
+	userEntity, userPkAttr, postEntity, postUserFkAttr := seedEntityRelationshipTestData(t)
+
+	validPayload := EntityRelationshipDefinition{
+		Name:              "UserPosts",
+		Description:       "Links users to their posts",
+		SourceEntityID:    userEntity.ID,
+		SourceAttributeID: userPkAttr.ID,
+		TargetEntityID:    postEntity.ID,
+		TargetAttributeID: postUserFkAttr.ID,
+		RelationshipType:  OneToMany,
+	}
+	payloadBytes, _ := json.Marshal(validPayload)
+	w := performRequest(testRouter, "POST", "/api/v1/entity-relationships/", bytes.NewReader(payloadBytes), nil)
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var createdRel EntityRelationshipDefinition
+	err := json.Unmarshal(w.Body.Bytes(), &createdRel)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, createdRel.ID)
+	assert.Equal(t, validPayload.Name, createdRel.Name)
+	assert.Equal(t, validPayload.SourceEntityID, createdRel.SourceEntityID)
+
+	// Test missing name
+	invalidPayload := `{"description": "Test", "source_entity_id": "x", "source_attribute_id": "y", "target_entity_id": "z", "target_attribute_id": "a", "relationship_type": "ONE_TO_ONE"}`
+	w = performRequest(testRouter, "POST", "/api/v1/entity-relationships/", strings.NewReader(invalidPayload), nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code) // Gin binding should catch this
+	
+	// Test invalid relationship type
+    invalidRelTypePayload := validPayload
+    invalidRelTypePayload.Name = "InvalidRelTypeTest" // Change name to avoid unique constraint
+    invalidRelTypePayload.RelationshipType = "INVALID_TYPE"
+    payloadBytes, _ = json.Marshal(invalidRelTypePayload)
+    w = performRequest(testRouter, "POST", "/api/v1/entity-relationships/", bytes.NewReader(payloadBytes), nil)
+    assert.Equal(t, http.StatusBadRequest, w.Code)
+    assert.Contains(t, w.Body.String(), "Invalid relationship_type")
+
+	// Test duplicate creation (name, source_entity_id, target_entity_id should be unique)
+    validPayload.Description = "Attempting duplicate" // Make it slightly different otherwise
+    payloadBytes, _ = json.Marshal(validPayload)
+	w = performRequest(testRouter, "POST", "/api/v1/entity-relationships/", bytes.NewReader(payloadBytes), nil)
+	assert.Equal(t, http.StatusConflict, w.Code) // Expect conflict due to unique constraint
+}
+
+func TestGetEntityRelationshipHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before ER test")
+	userEntity, userPkAttr, postEntity, postUserFkAttr := seedEntityRelationshipTestData(t)
+	
+	relDef := EntityRelationshipDefinition{
+		Name: "TestGetRel", SourceEntityID: userEntity.ID, SourceAttributeID: userPkAttr.ID,
+		TargetEntityID: postEntity.ID, TargetAttributeID: postUserFkAttr.ID, RelationshipType: OneToOne,
+	}
+	createdRel, err := testStore.CreateEntityRelationship(relDef) // Create directly via store
+	require.NoError(t, err)
+
+	w := performRequest(testRouter, "GET", "/api/v1/entity-relationships/"+createdRel.ID, nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var fetchedRel EntityRelationshipDefinition
+	err = json.Unmarshal(w.Body.Bytes(), &fetchedRel)
+	assert.NoError(t, err)
+	assert.Equal(t, createdRel.ID, fetchedRel.ID)
+	assert.Equal(t, relDef.Name, fetchedRel.Name)
+
+	w = performRequest(testRouter, "GET", "/api/v1/entity-relationships/non-existent-id", nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestListEntityRelationshipsHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before ER test")
+	userEntity, userPkAttr, postEntity, postUserFkAttr := seedEntityRelationshipTestData(t)
+
+	// Create a couple of relationships
+	_, err := testStore.CreateEntityRelationship(EntityRelationshipDefinition{
+		Name: "UserPostsList1", SourceEntityID: userEntity.ID, SourceAttributeID: userPkAttr.ID,
+		TargetEntityID: postEntity.ID, TargetAttributeID: postUserFkAttr.ID, RelationshipType: OneToMany,
+	})
+	require.NoError(t, err)
+	
+	postsAsSourceEntity, postsPkAttr, _, _ := seedEntityRelationshipTestData(t) // Need a PK for posts if it's a source
+	// Find the "id" attribute for postEntity
+	postAttrs, _ := testStore.ListAttributes(postEntity.ID)
+	var postPkForListTest AttributeDefinition
+	for _, pa := range postAttrs {
+		if pa.Name == "id" {
+			postPkForListTest = pa
+			break
+		}
+	}
+	require.NotEmpty(t, postPkForListTest.ID, "Post PK attribute 'id' not found for postEntity %s", postEntity.ID)
+
+
+	_, err = testStore.CreateEntityRelationship(EntityRelationshipDefinition{
+		Name: "PostAuthorsList2", SourceEntityID: postEntity.ID, SourceAttributeID: postPkForListTest.ID, // Post is source
+		TargetEntityID: userEntity.ID, TargetAttributeID: userPkAttr.ID, RelationshipType: ManyToOne,
+	})
+	require.NoError(t, err)
+
+
+	// Test listing all
+	w := performRequest(testRouter, "GET", "/api/v1/entity-relationships/", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var responseBody struct {
+		Data  []EntityRelationshipDefinition `json:"data"`
+		Total int64                          `json:"total"`
+	}
+	err = json.Unmarshal(w.Body.Bytes(), &responseBody)
+	assert.NoError(t, err)
+	assert.Len(t, responseBody.Data, 2)
+	assert.Equal(t, int64(2), responseBody.Total)
+
+	// Test filtering by source_entity_id
+	w = performRequest(testRouter, "GET", fmt.Sprintf("/api/v1/entity-relationships/?source_entity_id=%s", userEntity.ID), nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &responseBody)
+	assert.NoError(t, err)
+	assert.Len(t, responseBody.Data, 1)
+	assert.Equal(t, int64(1), responseBody.Total) // Assuming the handler correctly calculates total for filtered results
+	assert.Equal(t, "UserPostsList1", responseBody.Data[0].Name)
+}
+
+func TestUpdateEntityRelationshipHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before ER test")
+	userEntity, userPkAttr, postEntity, postUserFkAttr := seedEntityRelationshipTestData(t)
+	
+	relDef := EntityRelationshipDefinition{
+		Name: "OriginalRelName", Description: "Original Desc",
+		SourceEntityID: userEntity.ID, SourceAttributeID: userPkAttr.ID,
+		TargetEntityID: postEntity.ID, TargetAttributeID: postUserFkAttr.ID, RelationshipType: OneToOne,
+	}
+	createdRel, err := testStore.CreateEntityRelationship(relDef)
+	require.NoError(t, err)
+
+	updatePayload := createdRel // Copy existing
+	updatePayload.Name = "UpdatedRelName"
+	updatePayload.Description = "Updated Desc"
+	updatePayload.RelationshipType = ManyToOne
+	payloadBytes, _ := json.Marshal(updatePayload)
+
+	w := performRequest(testRouter, "PUT", "/api/v1/entity-relationships/"+createdRel.ID, bytes.NewReader(payloadBytes), nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var updatedRel EntityRelationshipDefinition
+	err = json.Unmarshal(w.Body.Bytes(), &updatedRel)
+	assert.NoError(t, err)
+	assert.Equal(t, "UpdatedRelName", updatedRel.Name)
+	assert.Equal(t, "Updated Desc", updatedRel.Description)
+	assert.Equal(t, ManyToOne, updatedRel.RelationshipType)
+	assert.True(t, updatedRel.UpdatedAt.After(createdRel.UpdatedAt))
+
+	// Test update non-existent
+	w = performRequest(testRouter, "PUT", "/api/v1/entity-relationships/non-existent-id", bytes.NewReader(payloadBytes), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestDeleteEntityRelationshipHandler(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before ER test")
+	userEntity, userPkAttr, postEntity, postUserFkAttr := seedEntityRelationshipTestData(t)
+	
+	relDef := EntityRelationshipDefinition{
+		Name: "RelToBeDeleted", SourceEntityID: userEntity.ID, SourceAttributeID: userPkAttr.ID,
+		TargetEntityID: postEntity.ID, TargetAttributeID: postUserFkAttr.ID, RelationshipType: OneToOne,
+	}
+	createdRel, err := testStore.CreateEntityRelationship(relDef)
+	require.NoError(t, err)
+
+	w := performRequest(testRouter, "DELETE", "/api/v1/entity-relationships/"+createdRel.ID, nil, nil)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, err = testStore.GetEntityRelationship(createdRel.ID) // Check if it's gone from store
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+
+	// Test delete non-existent
+	w = performRequest(testRouter, "DELETE", "/api/v1/entity-relationships/non-existent-id", nil, nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 

@@ -11,6 +11,32 @@ type EntityDefinition struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+
+// RelationshipType defines the nature of the connection between two entities.
+type RelationshipType string
+
+const (
+	OneToOne  RelationshipType = "ONE_TO_ONE"
+	OneToMany RelationshipType = "ONE_TO_MANY"
+	ManyToOne RelationshipType = "MANY_TO_ONE"
+	// ManyToMany might be complex to implement directly without an intermediary table
+	// and might be out of scope for initial implementation.
+)
+
+// EntityRelationshipDefinition defines how two entities (and specific attributes within them) are related.
+type EntityRelationshipDefinition struct {
+	ID                string           `json:"id"`
+	Name              string           `json:"name"` // User-friendly name for the relationship, e.g., "UserOrders"
+	Description       string           `json:"description,omitempty"`
+	SourceEntityID    string           `json:"source_entity_id"`    // ID of the source EntityDefinition
+	SourceAttributeID string           `json:"source_attribute_id"` // ID of the source AttributeDefinition (e.g., foreign key)
+	TargetEntityID    string           `json:"target_entity_id"`    // ID of the target EntityDefinition
+	TargetAttributeID string           `json:"target_attribute_id"` // ID of the target AttributeDefinition (e.g., primary key)
+	RelationshipType  RelationshipType `json:"relationship_type"`   // e.g., "ONE_TO_ONE", "ONE_TO_MANY"
+	CreatedAt         time.Time        `json:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at"`
+}
+
 // ScheduleDefinition defines the structure for a scheduled task.
 type ScheduleDefinition struct {
 	ID                string    `json:"id"`

@@ -1,11 +1,11 @@
 <template>
   <v-container>
-    <v-card variant="outlined" class="pa-3">
+    <v-card variant="outlined" class="pa-3 group-rule-builder-card">
       <v-card-title class="text-subtitle-1 pb-1">
         Grouping Rules
       </v-card-title>
       <v-card-subtitle class="pb-2">
-        Define rules to group entities. All rules are currently combined with AND.
+        Define nested rules and conditions to group entities.
       </v-card-subtitle>
       <v-divider class="mb-3"></v-divider>
 
@@ -16,90 +16,32 @@
       </div>
 
       <div v-else>
-        <v-row v-for="(rule, index) in localRules" :key="index" dense align="center" class="mb-2">
-          <v-col cols="12" md="4">
-            <v-select
-              v-model="rule.attributeId"
-              :items="attributeItems"
-              label="Attribute"
-              placeholder="Select Attribute"
-              variant="outlined"
-              density="compact"
-              hide-details
-              @update:modelValue="onRuleChange"
-            ></v-select>
-          </v-col>
-
-          <v-col cols="12" md="3">
-            <v-select
-              v-model="rule.operator"
-              :items="getOperatorsForAttribute(rule.attributeId)"
-              label="Operator"
-              placeholder="Select Operator"
-              variant="outlined"
-              density="compact"
-              hide-details
-              @update:modelValue="onRuleChange"
-            ></v-select>
-          </v-col>
-
-          <v-col cols="12" md="4">
-            <template v-if="!isUnaryOperator(rule.operator)">
-              <v-text-field
-                v-if="getInputTypeForAttribute(rule.attributeId) === 'text'"
-                v-model="rule.value"
-                label="Value"
-                placeholder="Enter value"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @input="onRuleChange"
-              ></v-text-field>
-              <v-checkbox
-                v-else-if="getInputTypeForAttribute(rule.attributeId) === 'boolean'"
-                v-model="rule.value"
-                label="Is True"
-                density="compact"
-                hide-details
-                @change="onRuleChange"
-              ></v-checkbox>
-               <v-text-field
-                v-else-if="getInputTypeForAttribute(rule.attributeId) === 'number'"
-                v-model.number="rule.value"
-                label="Value"
-                type="number"
-                placeholder="Enter number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @input="onRuleChange"
-              ></v-text-field>
-            </template>
-             <span v-else class="text-caption grey--text">(No value needed)</span>
-          </v-col>
-
-          <v-col cols="12" md="1" class="text-right">
-            <v-btn icon="mdi-delete" variant="text" color="error" @click="removeRule(index)" density="compact"></v-btn>
-          </v-col>
-        </v-row>
-
-        <v-btn color="primary" @click="addRule" :disabled="!entityId" class="mt-2">
-          <v-icon left>mdi-plus</v-icon> Add Rule
-        </v-btn>
+        <RuleNodeRenderer
+          :node="localRules"
+          :path="[]" 
+          :depth="0"
+          :availableAttributes="attributeItemsForRenderer"
+          :attributeStore="attributeStore" 
+          @update-node="handleUpdateNode"
+          @remove-node="handleRemoveNode"
+          @add-condition="handleAddCondition"
+          @add-group="handleAddGroup"
+        />
       </div>
+      
       <v-textarea
         v-if="debugMode"
-        v-model="currentJsonOutput"
+        :model-value="currentJsonOutput" 
         label="Current JSON Output (Debug)"
         readonly
         auto-grow
-        rows="3"
+        rows="5"
         class="mt-4"
         variant="outlined"
         density="compact"
       ></v-textarea>
       <v-alert v-if="parsingError" type="error" dense class="mt-3">
-        Error parsing existing rules: {{ parsingError }}. Rules have been reset.
+        Error processing rules: {{ parsingError }}. Rules may have been reset or defaulted.
       </v-alert>
     </v-card>
   </v-container>
@@ -107,14 +49,16 @@
 
 <script setup>
 import { ref, watch, computed, onMounted } from 'vue';
-import { useAttributeStore } from '@/store/attributeStore';
+import { v4 as uuidv4 } from 'uuid';
+import { useAttributeStore } from '@/store/attributeStore'; // Ensure path is correct
+import RuleNodeRenderer from './RuleNodeRenderer.vue';
 
 const props = defineProps({
   modelValue: { // JSON string of rules
     type: String,
     default: '',
   },
-  entityId: {
+  entityId: { // Selected entity ID for which rules are being defined
     type: String,
     default: null,
   },
@@ -123,189 +67,267 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue']);
 
 const attributeStore = useAttributeStore();
-const localRules = ref([]); // Array of { attributeId: '', operator: '', value: '' }
+const localRules = ref(createDefaultRootGroup()); // Root of the rule tree
 const parsingError = ref(null);
-const debugMode = ref(false); // Set to true to see JSON output for debugging
+const debugMode = ref(import.meta.env.DEV); // Show debug output in development
 
-const entityAttributes = computed(() => attributeStore.attributes);
+// --- Initialization and Data Structure ---
+function createDefaultRootGroup() {
+  return {
+    id: uuidv4(), // Internal UI ID
+    type: 'group',
+    logical_operator: 'AND',
+    rules: [],
+  };
+}
 
-const attributeItems = computed(() => {
-  return entityAttributes.value.map(attr => ({
-    title: attr.name,
-    value: attr.id,
-    dataType: attr.data_type, // Store data type for operator/input logic
+function createNewCondition() {
+  return {
+    id: uuidv4(),
+    type: 'condition',
+    attributeId: '', // Will be attribute_id in JSON
+    attributeName: '',
+    entityId: '',    // Will be entity_id in JSON
+    operator: '',
+    value: '',
+    valueType: '',   // Will be value_type in JSON (derived from attribute)
+  };
+}
+
+function createNewGroup() {
+  return {
+    id: uuidv4(),
+    type: 'group',
+    logical_operator: 'AND',
+    rules: [],
+  };
+}
+
+// Attributes to be passed to RuleNodeRenderer
+const attributeItemsForRenderer = computed(() => {
+  // attributeStore.attributes should be [{id, name, entity_id, data_type, entity_name}, ...]
+  // RuleNodeRenderer expects 'availableAttributes' with id, name, entityName
+  return attributeStore.attributes.map(attr => ({
+    id: attr.id, // Used as value in select
+    name: attr.name, // Display name
+    entityName: attr.entity_name, // For display in dropdown like "Attribute (Entity)"
+    entity_id: attr.entity_id, // Crucial for JSON output
+    data_type: attr.data_type, // For operator/input logic
   }));
 });
 
-const currentJsonOutput = computed(() => {
-  if (localRules.value.length === 0) return '';
-  const conditions = localRules.value
-    .filter(rule => rule.attributeId && rule.operator) // Only include valid rules
-    .map(rule => {
-      const attr = entityAttributes.value.find(a => a.id === rule.attributeId);
-      const baseRule = {
-        field: attr ? attr.name : rule.attributeId, // Fallback to ID if name not found
-        operator: rule.operator,
-      };
-      if (!isUnaryOperator(rule.operator)) {
-        baseRule.value = rule.value;
-      }
-      return baseRule;
-    });
 
-  if (conditions.length === 0) return '';
-  return JSON.stringify({ logical_operator: "AND", conditions }, null, 2);
+// --- Tree Traversal and Modification ---
+function getNodeByPath(path, rootNode = localRules.value) {
+  let currentNode = rootNode;
+  for (const index of path) {
+    if (!currentNode || !currentNode.rules || !currentNode.rules[index]) {
+      console.error('Invalid path or node not found at path:', path, 'in node:', rootNode);
+      return null;
+    }
+    currentNode = currentNode.rules[index];
+  }
+  return currentNode;
+}
+
+function getParentNodeByPath(path, rootNode = localRules.value) {
+  if (!path || path.length === 0) return null; // Root has no parent
+  let parent = rootNode;
+  for (let i = 0; i < path.length - 1; i++) {
+    const index = path[i];
+    if (!parent || !parent.rules || !parent.rules[index]) {
+      console.error('Invalid parent path:', path);
+      return null;
+    }
+    parent = parent.rules[index];
+  }
+  return parent;
+}
+
+// --- Event Handlers from RuleNodeRenderer ---
+function handleUpdateNode(path, updates) {
+  const nodeToUpdate = path.length === 0 ? localRules.value : getNodeByPath(path);
+  if (nodeToUpdate) {
+    Object.assign(nodeToUpdate, updates);
+  } else {
+    console.error('Node not found for update at path:', path);
+  }
+}
+
+function handleRemoveNode(path) {
+  if (path.length === 0) { // Cannot remove root node
+    localRules.value = createDefaultRootGroup(); // Reset to default
+    return;
+  }
+  const parentNode = getParentNodeByPath(path);
+  const nodeIndex = path[path.length - 1];
+  if (parentNode && parentNode.rules && parentNode.rules[nodeIndex] !== undefined) {
+    parentNode.rules.splice(nodeIndex, 1);
+  } else {
+    console.error('Node or parent not found for removal at path:', path);
+  }
+}
+
+function handleAddCondition(groupPath) {
+  const parentGroup = groupPath.length === 0 ? localRules.value : getNodeByPath(groupPath);
+  if (parentGroup && parentGroup.type === 'group') {
+    parentGroup.rules.push(createNewCondition());
+  } else {
+    console.error('Parent group not found or not a group at path:', groupPath);
+  }
+}
+
+function handleAddGroup(groupPath) {
+  const parentGroup = groupPath.length === 0 ? localRules.value : getNodeByPath(groupPath);
+  if (parentGroup && parentGroup.type === 'group') {
+    parentGroup.rules.push(createNewGroup());
+  } else {
+    console.error('Parent group not found or not a group at path:', groupPath);
+  }
+}
+
+// --- JSON Generation (Internal to Standardized) ---
+function buildJsonNode(internalNode) {
+  if (!internalNode) return null;
+
+  if (internalNode.type === 'condition') {
+    if (!internalNode.attributeId || !internalNode.operator) return null; // Incomplete condition
+
+    const attribute = attributeStore.getAttributeById(internalNode.attributeId);
+    // Value coercion happens here or in RuleNodeRenderer; ensure consistency.
+    // RuleNodeRenderer currently does some coercion.
+    return {
+      type: "condition",
+      attribute_id: internalNode.attributeId,
+      attribute_name: attribute ? attribute.name : internalNode.attributeName,
+      entity_id: attribute ? attribute.entity_id : internalNode.entityId,
+      operator: internalNode.operator,
+      value: internalNode.value, // Assuming value is already correctly typed
+      value_type: attribute ? attribute.data_type : internalNode.valueType,
+    };
+  } else if (internalNode.type === 'group') {
+    return {
+      type: "group",
+      logical_operator: internalNode.logical_operator,
+      rules: internalNode.rules.map(rule => buildJsonNode(rule)).filter(r => r !== null),
+    };
+  }
+  return null;
+}
+
+const currentJsonOutput = computed(() => {
+  const jsonStructure = buildJsonNode(localRules.value);
+  if (!jsonStructure) return ""; // Handle case where root is invalid (should not happen)
+  return JSON.stringify(jsonStructure, null, 2);
 });
 
-
-// --- Operator and Input Type Logic ---
-const baseOperators = [
-  { title: 'Equals', value: 'equals' },
-  { title: 'Does Not Equal', value: 'not_equals' },
-  { title: 'Contains', value: 'contains' }, // String specific
-  { title: 'Does Not Contain', value: 'not_contains' }, // String specific
-  { title: 'Is Null', value: 'is_null', unary: true },
-  { title: 'Is Not Null', value: 'is_not_null', unary: true },
-];
-const numericOperators = [
-  ...baseOperators.filter(op => op.value === 'equals' || op.value === 'not_equals' || op.value === 'is_null' || op.value === 'is_not_null'),
-  { title: 'Greater Than', value: 'greater_than' },
-  { title: 'Less Than', value: 'less_than' },
-  { title: 'Greater Than or Equal To', value: 'greater_than_or_equal_to' },
-  { title: 'Less Than or Equal To', value: 'less_than_or_equal_to' },
-];
-const booleanOperators = [
-  { title: 'Is True', value: 'is_true', unary: true, impliedValue: true }, // Or 'equals' with value true
-  { title: 'Is False', value: 'is_false', unary: true, impliedValue: false }, // Or 'equals' with value false
-  { title: 'Is Null', value: 'is_null', unary: true },
-  { title: 'Is Not Null', value: 'is_not_null', unary: true },
-];
- // Default to string/text operators
-const stringOperators = baseOperators;
-
-function getOperatorsForAttribute(attributeId) {
-  const attribute = attributeItems.value.find(attr => attr.value === attributeId);
-  if (!attribute) return stringOperators;
-  switch (attribute.dataType?.toLowerCase()) {
-    case 'integer':
-    case 'float':
-    case 'datetime': // DateTime can be compared with greater/less than
-      return numericOperators;
-    case 'boolean':
-      return booleanOperators;
-    case 'string':
-    case 'text':
-    case 'json': // JSON could be stringified for 'contains' or 'equals'
-    default:
-      return stringOperators;
+// --- Parsing Input JSON (Standardized to Internal) ---
+function parseJsonNode(jsonNode) {
+  if (!jsonNode || !jsonNode.type) {
+    console.warn("Parsing invalid JSON node:", jsonNode);
+    return null;
   }
-}
+  const id = uuidv4();
 
-function getInputTypeForAttribute(attributeId) {
-  const attribute = attributeItems.value.find(attr => attr.value === attributeId);
-  if (!attribute) return 'text';
-  switch (attribute.dataType?.toLowerCase()) {
-    case 'integer':
-    case 'float':
-      return 'number';
-    case 'boolean':
-      return 'boolean';
-    default:
-      return 'text';
+  if (jsonNode.type === 'condition') {
+    const attribute = attributeStore.getAttributeById(jsonNode.attribute_id);
+    return {
+      id,
+      type: 'condition',
+      attributeId: jsonNode.attribute_id,
+      attributeName: jsonNode.attribute_name || (attribute ? attribute.name : ''),
+      entityId: jsonNode.entity_id || (attribute ? attribute.entity_id : ''),
+      operator: jsonNode.operator,
+      value: jsonNode.value, // Value type should be handled by input components or on display
+      valueType: jsonNode.value_type || (attribute ? attribute.data_type : 'string'),
+    };
+  } else if (jsonNode.type === 'group') {
+    return {
+      id,
+      type: 'group',
+      logical_operator: jsonNode.logical_operator || 'AND',
+      rules: Array.isArray(jsonNode.rules) ? jsonNode.rules.map(rule => parseJsonNode(rule)).filter(r => r !== null) : [],
+    };
   }
+  return null;
 }
 
-function isUnaryOperator(operatorValue) {
-  const allOperators = [...stringOperators, ...numericOperators, ...booleanOperators];
-  const operator = allOperators.find(op => op.value === operatorValue);
-  return operator?.unary || false;
-}
-// --- End Operator and Input Type Logic ---
-
-
-watch(() => props.entityId, (newEntityId) => {
-  localRules.value = []; // Reset rules when entity changes
+function parseAndSetRules(jsonString) {
   parsingError.value = null;
-  if (newEntityId) {
-    attributeStore.fetchAttributesForEntity(newEntityId);
-  } else {
-    attributeStore.clearAttributes();
+  try {
+    if (jsonString && jsonString.trim() !== '') {
+      const parsedJson = JSON.parse(jsonString);
+      if (parsedJson && parsedJson.type === 'group') {
+        const newRules = parseJsonNode(parsedJson);
+        if (newRules) {
+          localRules.value = newRules;
+        } else {
+          console.error("Failed to parse valid structure from JSON prop. Resetting to default.");
+          localRules.value = createDefaultRootGroup();
+        }
+      } else {
+        // If props.modelValue is not a group, or invalid, initialize with a default root.
+        // This can happen if an old flat structure is passed.
+        console.warn("Input JSON is not a valid group structure or is empty. Initializing with default.", parsedJson);
+        localRules.value = createDefaultRootGroup();
+        if (jsonString.trim() !== '{}' && jsonString.trim() !== '""' && jsonString.trim() !== '') {
+             // Don't show error for empty or default empty object/string
+            parsingError.value = "Provided rules were not in the expected nested format and have been reset.";
+        }
+      }
+    } else {
+      localRules.value = createDefaultRootGroup(); // Initialize if string is empty
+    }
+  } catch (error) {
+    console.error('Error parsing rule JSON from prop:', error, "\nJSON string:", jsonString);
+    localRules.value = createDefaultRootGroup(); // Reset to default on error
+    parsingError.value = `Failed to parse rules: ${error.message}. Rules have been reset.`;
   }
-  onRuleChange(); // Emit empty rules
+}
+
+// --- Watchers ---
+watch(() => props.entityId, (newEntityId, oldEntityId) => {
+  if (newEntityId !== oldEntityId) {
+    localRules.value = createDefaultRootGroup(); // Reset rules
+    parsingError.value = null;
+    if (newEntityId) {
+      attributeStore.fetchAttributesForEntity(newEntityId); // Fetch attributes for the new entity
+    } else {
+      attributeStore.clearAttributes();
+    }
+    // No need to emit here, changing entity implies new rule set
+  }
 }, { immediate: true });
 
-
-watch(() => props.modelValue, (newJsonRules) => {
-  if (newJsonRules === currentJsonOutput.value) {
-    // Avoid re-parsing if the change came from internal update
-    return;
+watch(() => props.modelValue, (newValue) => {
+  if (newValue !== currentJsonOutput.value) { // Avoid re-parsing if change came from internal update
+    parseAndSetRules(newValue);
   }
-  parseAndSetRules(newJsonRules);
-}, { immediate: true }); // Parse initial modelValue if provided
+}, { immediate: true }); // Parse initial value
 
-function parseAndSetRules(jsonRules) {
-  parsingError.value = null;
-  if (!jsonRules || typeof jsonRules !== 'string') {
-    localRules.value = [];
-    return;
+watch(localRules, (newRules) => {
+  const newJson = currentJsonOutput.value;
+  // Check if the newJson is actually different from what was received via prop modelValue
+  // This is to prevent emitting update if the internal change is just due to initial parsing.
+  if (newJson !== props.modelValue) {
+      emit('update:modelValue', newJson);
   }
-  try {
-    const parsed = JSON.parse(jsonRules);
-    if (parsed && Array.isArray(parsed.conditions)) {
-      localRules.value = parsed.conditions.map(condition => {
-        const attr = entityAttributes.value.find(a => a.name === condition.field);
-        return {
-          attributeId: attr ? attr.id : condition.field, // Store ID if found, else original field name
-          operator: condition.operator,
-          value: condition.value,
-        };
-      });
-    } else {
-      localRules.value = [];
-      if (jsonRules.trim() !== "") { // Don't error for empty initial string
-        parsingError.value = "Invalid rule structure. Expected 'conditions' array.";
-      }
-    }
-  } catch (e) {
-    localRules.value = [];
-    if (jsonRules.trim() !== "") { // Don't error for empty initial string
-       parsingError.value = e.message;
-    }
-    console.error("Error parsing rules JSON:", e);
+}, { deep: true });
+
+
+onMounted(async () => {
+  // Ensure attributes are loaded if an entityId is present on mount
+  if (props.entityId && attributeStore.attributes.length === 0) {
+    await attributeStore.fetchAttributesForEntity(props.entityId);
   }
-}
-
-
-function addRule() {
-  localRules.value.push({ attributeId: '', operator: '', value: '' });
-  onRuleChange(); // To potentially update JSON if this empty rule should be part of it (it won't by current logic)
-}
-
-function removeRule(index) {
-  localRules.value.splice(index, 1);
-  onRuleChange();
-}
-
-function onRuleChange() {
-  const jsonToEmit = currentJsonOutput.value;
-  emit('update:modelValue', jsonToEmit);
-}
-
-onMounted(() => {
-  // Initial fetch if entityId is already set and attributes aren't loaded
-  if (props.entityId && entityAttributes.value.length === 0) {
-    attributeStore.fetchAttributesForEntity(props.entityId);
-  }
-  // Parse initial modelValue if provided and not already parsed by watch
-  if (props.modelValue && localRules.value.length === 0) {
-      parseAndSetRules(props.modelValue);
-  }
+  // Initial parsing is handled by the immediate watcher on props.modelValue
 });
 
 </script>
 
 <style scoped>
-.v-card--variant-outlined {
+.group-rule-builder-card {
   border-color: rgba(0,0,0,0.12);
 }
+/* Add any additional styles for GroupRuleBuilder.vue itself if needed */
 </style>

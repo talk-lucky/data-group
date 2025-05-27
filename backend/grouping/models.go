@@ -2,6 +2,8 @@ package main
 
 import "time"
 
+// DEPRECATED: This struct is part of an older rule definition system.
+// Use structs in grouping/service.go (RuleCondition) for new rule processing.
 // RuleCondition defines a single condition within a rule set.
 // The AttributeID here refers to the ID of an AttributeDefinition.
 type RuleCondition struct {
@@ -10,6 +12,8 @@ type RuleCondition struct {
 	Value       interface{} `json:"value,omitempty"` // Value might be omitted for unary operators like 'is_null'
 }
 
+// DEPRECATED: This struct is part of an older rule definition system.
+// Use structs in grouping/service.go (RuleGroup) for new rule processing.
 // RuleSet defines a collection of conditions and how they are logically combined.
 type RuleSet struct {
 	Conditions      []RuleCondition `json:"conditions"`
