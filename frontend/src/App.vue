@@ -9,6 +9,7 @@
       <v-btn text to="/groups">Groups</v-btn>
       <v-btn text to="/actiontemplates">Action Templates</v-btn>
       <v-btn text to="/workflows">Workflows</v-btn>
+      <v-btn text to="/entity-relationships">Entity Relationships</v-btn>
       <!-- Add other navigation items here if needed -->
     </v-app-bar>
 

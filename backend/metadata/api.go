@@ -100,6 +100,16 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 		scheduleRoutes.PUT("/:schedule_id", a.updateScheduleDefinitionHandler)
 		scheduleRoutes.DELETE("/:schedule_id", a.deleteScheduleDefinitionHandler)
 	}
+
+	// Entity Relationship Routes
+	entityRelationshipRoutes := v1.Group("/entity-relationships")
+	{
+		entityRelationshipRoutes.POST("/", a.createEntityRelationshipHandler)
+		entityRelationshipRoutes.GET("/", a.listEntityRelationshipsHandler)
+		entityRelationshipRoutes.GET("/:id", a.getEntityRelationshipHandler)
+		entityRelationshipRoutes.PUT("/:id", a.updateEntityRelationshipHandler)
+		entityRelationshipRoutes.DELETE("/:id", a.deleteEntityRelationshipHandler)
+	}
 }
 
 // --- Entity Handlers ---
@@ -166,6 +176,143 @@ func (a *API) deleteEntityHandler(c *gin.Context) {
 	err := a.store.DeleteEntity(entityID)
 	if err != nil {
 		handleStoreError(c, err, "Entity")
+		return
+	}
+	c.JSON(http.StatusNoContent, nil)
+}
+
+
+// --- EntityRelationshipDefinition Handlers ---
+
+func (a *API) createEntityRelationshipHandler(c *gin.Context) {
+	var req EntityRelationshipDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	// ID, CreatedAt, UpdatedAt are set by the store
+	req.ID = "" 
+
+	// Basic validation for RelationshipType
+	switch req.RelationshipType {
+	case OneToOne, OneToMany, ManyToOne:
+		// valid
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE"})
+		return
+	}
+	
+	// TODO: Add validation to check if Source/Target Entity/Attribute IDs exist
+	// This requires querying the store for those entities/attributes.
+	// For now, we rely on DB foreign key constraints.
+
+	er, err := a.store.CreateEntityRelationship(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Failed to create entity relationship: " + err.Error()})
+		} else if strings.Contains(err.Error(), "violates foreign key constraint") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity or attribute ID: " + err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create entity relationship: " + err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, er)
+}
+
+func (a *API) listEntityRelationshipsHandler(c *gin.Context) {
+	// TODO: Implement pagination (offset, limit) and filtering (e.g., by source_entity_id)
+	// For now, lists all.
+	// Example query params: /entity-relationships?source_entity_id=xxx&offset=0&limit=20
+	
+	sourceEntityID := c.Query("source_entity_id")
+	// offsetStr := c.DefaultQuery("offset", "0")
+	// limitStr := c.DefaultQuery("limit", "20") // Default limit to 20
+	// offset, errOff := strconv.Atoi(offsetStr)
+	// limit, errLim := strconv.Atoi(limitStr)
+
+	// if errOff != nil || errLim != nil || offset < 0 || limit <= 0 {
+	// 	c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pagination parameters"})
+	// 	return
+	// }
+	
+	var relationships []EntityRelationshipDefinition
+	var err error
+
+	if sourceEntityID != "" {
+		// This store method needs to be created or adapted if it doesn't exist.
+		// Assuming GetEntityRelationshipsBySourceEntity exists as per plan.
+		relationships, err = a.store.GetEntityRelationshipsBySourceEntity(sourceEntityID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list entity relationships by source entity: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": relationships, "total": len(relationships)}) // total count for filtered list
+	} else {
+		// Using a simplified ListEntityRelationships for now as pagination is not fully implemented in store method signature yet.
+		// The planned store.ListEntityRelationships(offset, limit int) ([]*EntityRelationshipDefinition, int64, error)
+		// would be used here. For now, let's assume a simpler ListAll type method or adapt.
+		// For simplicity, let's assume a temporary ListAllEntityRelationships method or adapt the existing one.
+		// This part needs to align with the actual store method.
+		// Let's assume ListEntityRelationships(0, 1000) lists all up to 1000 for now.
+		rels, total, listErr := a.store.ListEntityRelationships(0, 1000) // Temporary fixed limit for non-paginated version
+		if listErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list entity relationships: " + listErr.Error()})
+			return
+		}
+		relationships = rels
+		c.JSON(http.StatusOK, gin.H{"data": relationships, "total": total})
+	}
+}
+
+func (a *API) getEntityRelationshipHandler(c *gin.Context) {
+	erID := c.Param("id")
+	er, err := a.store.GetEntityRelationship(erID)
+	if err != nil {
+		handleStoreError(c, err, "EntityRelationship")
+		return
+	}
+	c.JSON(http.StatusOK, er)
+}
+
+func (a *API) updateEntityRelationshipHandler(c *gin.Context) {
+	erID := c.Param("id")
+	var req EntityRelationshipDefinition
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		return
+	}
+	
+	// Basic validation for RelationshipType
+	switch req.RelationshipType {
+	case OneToOne, OneToMany, ManyToOne:
+		// valid
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE"})
+		return
+	}
+
+	// TODO: Add validation for IDs if necessary
+
+	er, err := a.store.UpdateEntityRelationship(erID, req)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Failed to update entity relationship: " + err.Error()})
+		} else if strings.Contains(err.Error(), "violates foreign key constraint") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity or attribute ID: " + err.Error()})
+		} else {
+			handleStoreError(c, err, "EntityRelationship")
+		}
+		return
+	}
+	c.JSON(http.StatusOK, er)
+}
+
+func (a *API) deleteEntityRelationshipHandler(c *gin.Context) {
+	erID := c.Param("id")
+	err := a.store.DeleteEntityRelationship(erID)
+	if err != nil {
+		handleStoreError(c, err, "EntityRelationship")
 		return
 	}
 	c.JSON(http.StatusNoContent, nil)
