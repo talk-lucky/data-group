@@ -11,6 +11,77 @@ type EntityDefinition struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// --- Bulk Operation Structs for Entities ---
+
+// EntityCreateData holds the data for creating a single entity within a bulk request.
+type EntityCreateData struct {
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description,omitempty"`
+}
+
+// BulkCreateEntitiesRequest defines the structure for a bulk entity creation request.
+type BulkCreateEntitiesRequest struct {
+	// Entities is a list of entities to be created.
+	Entities []EntityCreateData `json:"entities" binding:"required,dive"`
+}
+
+// EntityUpdateData holds the data for updating a single entity within a bulk request.
+// ID is required to identify the entity. Other fields are optional for partial updates.
+type EntityUpdateData struct {
+	ID          string `json:"id" binding:"required"`
+	Name        string `json:"name,omitempty"`        // omitempty means if not provided, it won't be included in JSON, allowing for partial updates
+	Description string `json:"description,omitempty"` // omitempty allows for partial updates
+}
+
+// BulkUpdateEntitiesRequest defines the structure for a bulk entity update request.
+type BulkUpdateEntitiesRequest struct {
+	// Entities is a list of entities to be updated.
+	Entities []EntityUpdateData `json:"entities" binding:"required,dive"`
+}
+
+// BulkDeleteEntitiesRequest defines the structure for a bulk entity deletion request.
+type BulkDeleteEntitiesRequest struct {
+	// EntityIDs is a list of entity IDs to be deleted.
+	EntityIDs []string `json:"entity_ids" binding:"required,dive"`
+}
+
+// BulkOperationResultItem represents the result of a single operation within a bulk request.
+type BulkOperationResultItem struct {
+	// ID is the identifier of the item that was processed.
+	// It might be empty if the operation (e.g., creation) failed before an ID was assigned or known.
+	ID string `json:"id,omitempty"`
+	// Success indicates whether the operation on this item was successful.
+	Success bool `json:"success"`
+	// Error provides a message if the operation on this item failed.
+	Error string `json:"error,omitempty"`
+	// Entity holds the created/updated entity if the operation was successful and applicable.
+	Entity *EntityDefinition `json:"entity,omitempty"`
+}
+
+// BulkOperationResponse defines the structure for the response of a bulk operation.
+// It contains a list of results for each item processed in the bulk request.
+type BulkOperationResponse struct {
+	// Results is a list detailing the outcome for each individual item in the bulk operation.
+	Results []BulkOperationResultItem `json:"results"`
+}
+
+// APIError represents a standard error response format for the API.
+type APIError struct {
+	// Code is the HTTP status code or a custom error code.
+	Code int `json:"code"`
+	// Message is a human-readable error message.
+	Message string `json:"message"`
+}
+
+// ListResponse represents a generic structure for API responses that return a list of items.
+// It includes the data itself and a total count for pagination purposes.
+type ListResponse struct {
+	// Data holds the list of items. It's an interface{} to be flexible for various data types.
+	Data interface{} `json:"data"`
+	// Total is the total number of items available, which might be more than the items returned in a single response.
+	Total int64 `json:"total"`
+}
+
 
 // RelationshipType defines the nature of the connection between two entities.
 type RelationshipType string

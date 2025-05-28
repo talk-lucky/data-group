@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"strings"
+
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
@@ -213,26 +215,59 @@ func (s *PostgresStore) GetEntity(id string) (EntityDefinition, error) {
 	return entity, nil
 }
 
-func (s *PostgresStore) ListEntities() ([]EntityDefinition, error) {
+func (s *PostgresStore) ListEntities(params ListParams) ([]EntityDefinition, int64, error) {
 	var entities []EntityDefinition
-	query := `SELECT id, name, description, created_at, updated_at FROM entity_definitions ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	// Base query for counting
+	countQueryStr := "SELECT COUNT(*) FROM entity_definitions"
+	// Base query for selecting data
+	selectQueryStr := "SELECT id, name, description, created_at, updated_at FROM entity_definitions"
+
+	// args will hold query parameters
+	var args []interface{}
+	var countArgs []interface{}
+
+	// TODO: Implement filtering based on params.Filters if any
+	// Example: if nameFilter, ok := params.Filters["name"].(string); ok && nameFilter != "" {
+	//    countQueryStr += " WHERE name ILIKE $1"
+	//    selectQueryStr += " WHERE name ILIKE $1"
+	//    countArgs = append(countArgs, "%"+nameFilter+"%")
+	//    args = append(args, "%"+nameFilter+"%")
+	// }
+
+
+	// Get total count
+	err := s.DB.QueryRow(countQueryStr, countArgs...).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListEntities failed: %w", err)
+		return nil, 0, fmt.Errorf("ListEntities count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []EntityDefinition{}, 0, nil
+	}
+
+	// Add ordering, limit, and offset for selecting data
+	selectQueryStr += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(selectQueryStr, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListEntities query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var entity EntityDefinition
 		if err := rows.Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("ListEntities row scan failed: %w", err)
+			return nil, 0, fmt.Errorf("ListEntities row scan failed: %w", err)
 		}
 		entities = append(entities, entity)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListEntities rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListEntities rows iteration error: %w", err)
 	}
-	return entities, nil
+	return entities, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateEntity(id, name, description string) (EntityDefinition, error) {
@@ -326,12 +361,36 @@ func (s *PostgresStore) GetEntityRelationshipsBySourceEntity(sourceEntityID stri
 	return defs, nil
 }
 
-func (s *PostgresStore) ListEntityRelationships(offset, limit int) ([]EntityRelationshipDefinition, int64, error) {
+func (s *PostgresStore) ListEntityRelationships(params ListParams) ([]EntityRelationshipDefinition, int64, error) {
 	var defs []EntityRelationshipDefinition
-	
-	countQuery := `SELECT COUNT(*) FROM entity_relationship_definitions`
 	var totalCount int64
-	err := s.DB.QueryRow(countQuery).Scan(&totalCount)
+
+	baseCountQuery := "SELECT COUNT(*) FROM entity_relationship_definitions"
+	baseSelectQuery := `SELECT id, name, description, source_entity_id, source_attribute_id, 
+						target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+						FROM entity_relationship_definitions`
+
+	var whereClauses []string
+	var args []interface{}
+	var countArgs []interface{}
+	argCounter := 1
+
+	if sourceEntityID, ok := params.Filters["source_entity_id"].(string); ok && sourceEntityID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("source_entity_id = $%d", argCounter))
+		args = append(args, sourceEntityID)
+		countArgs = append(countArgs, sourceEntityID)
+		argCounter++
+	}
+
+	// TODO: Add other filters here as needed, incrementing argCounter
+
+	if len(whereClauses) > 0 {
+		whereStr := " WHERE " + strings.Join(whereClauses, " AND ")
+		baseCountQuery += whereStr
+		baseSelectQuery += whereStr
+	}
+
+	err := s.DB.QueryRow(baseCountQuery, countArgs...).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListEntityRelationships count query failed: %w", err)
 	}
@@ -339,10 +398,11 @@ func (s *PostgresStore) ListEntityRelationships(offset, limit int) ([]EntityRela
 	if totalCount == 0 {
 		return []EntityRelationshipDefinition{}, 0, nil
 	}
-	
-	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
-              FROM entity_relationship_definitions ORDER BY name LIMIT $1 OFFSET $2`
-	rows, err := s.DB.Query(query, limit, offset)
+
+	baseSelectQuery += fmt.Sprintf(" ORDER BY name LIMIT $%d OFFSET $%d", argCounter, argCounter+1)
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(baseSelectQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListEntityRelationships query failed: %w", err)
 	}
@@ -351,7 +411,8 @@ func (s *PostgresStore) ListEntityRelationships(offset, limit int) ([]EntityRela
 	for rows.Next() {
 		var def EntityRelationshipDefinition
 		if err := rows.Scan(
-			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
+			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID,
+			&def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListEntityRelationships row scan failed: %w", err)
 		}
@@ -437,29 +498,53 @@ func (s *PostgresStore) GetScheduleDefinition(id string) (ScheduleDefinition, er
 	return def, nil
 }
 
-func (s *PostgresStore) ListScheduleDefinitions() ([]ScheduleDefinition, error) {
+func (s *PostgresStore) ListScheduleDefinitions(params ListParams) ([]ScheduleDefinition, int64, error) {
 	var defs []ScheduleDefinition
-	query := `SELECT id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at 
-              FROM schedule_definitions ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM schedule_definitions"
+	baseSelectQuery := `SELECT id, name, description, cron_expression, task_type, 
+						task_parameters, is_enabled, created_at, updated_at 
+						FROM schedule_definitions`
+	
+	var args []interface{}
+	// var countArgs []interface{} // If filters were added
+
+	// TODO: Implement filtering based on params.Filters if any
+	// Add WHERE clauses to baseCountQuery and baseSelectQuery, and populate countArgs/args
+
+	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListScheduleDefinitions failed: %w", err)
+		return nil, 0, fmt.Errorf("ListScheduleDefinitions count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []ScheduleDefinition{}, 0, nil
+	}
+	
+	baseSelectQuery += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListScheduleDefinitions query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var def ScheduleDefinition
 		if err := rows.Scan(
-			&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, &def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+			&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, 
+			&def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
-			return nil, fmt.Errorf("ListScheduleDefinitions row scan failed: %w", err)
+			return nil, 0, fmt.Errorf("ListScheduleDefinitions row scan failed: %w", err)
 		}
 		defs = append(defs, def)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListScheduleDefinitions rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListScheduleDefinitions rows iteration error: %w", err)
 	}
-	return defs, nil
+	return defs, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateScheduleDefinition(id string, def ScheduleDefinition) (ScheduleDefinition, error) {
@@ -539,27 +624,62 @@ func (s *PostgresStore) GetAttribute(entityID, attributeID string) (AttributeDef
 	return attr, nil
 }
 
-func (s *PostgresStore) ListAttributes(entityID string) ([]AttributeDefinition, error) {
+func (s *PostgresStore) ListAttributes(entityID string, params ListParams) ([]AttributeDefinition, int64, error) {
 	var attrs []AttributeDefinition
-	query := `SELECT id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at 
-              FROM attribute_definitions WHERE entity_id = $1 ORDER BY name`
-	rows, err := s.DB.Query(query, entityID)
+	var totalCount int64
+
+	// Base query for counting
+	countQueryStr := "SELECT COUNT(*) FROM attribute_definitions WHERE entity_id = $1"
+	// Base query for selecting data
+	selectQueryStr := `SELECT id, entity_id, name, data_type, description, is_filterable, 
+						 is_pii, is_indexed, created_at, updated_at 
+						 FROM attribute_definitions WHERE entity_id = $1`
+
+	var args []interface{}
+	var countArgs []interface{}{entityID}
+	argCounter := 2 // Start after entity_id
+
+	// TODO: Implement filtering based on params.Filters if any
+	// Example: if nameFilter, ok := params.Filters["name"].(string); ok && nameFilter != "" {
+	//    countQueryStr += fmt.Sprintf(" AND name ILIKE $%d", argCounter)
+	//    selectQueryStr += fmt.Sprintf(" AND name ILIKE $%d", argCounter)
+	//    countArgs = append(countArgs, "%"+nameFilter+"%")
+	//    args = append(args, "%"+nameFilter+"%")
+	//    argCounter++
+	// }
+	
+	err := s.DB.QueryRow(countQueryStr, countArgs...).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListAttributes failed: %w", err)
+		return nil, 0, fmt.Errorf("ListAttributes count query for entityID %s failed: %w", entityID, err)
+	}
+
+	if totalCount == 0 {
+		return []AttributeDefinition{}, 0, nil
+	}
+	
+	args = append(args, entityID) // First arg for select is entity_id
+	selectQueryStr += fmt.Sprintf(" ORDER BY name LIMIT $%d OFFSET $%d", argCounter, argCounter+1)
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+
+	rows, err := s.DB.Query(selectQueryStr, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListAttributes query for entityID %s failed: %w", entityID, err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var attr AttributeDefinition
-		if err := rows.Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("ListAttributes row scan failed: %w", err)
+		if err := rows.Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, 
+			&attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("ListAttributes row scan for entityID %s failed: %w", entityID, err)
 		}
 		attrs = append(attrs, attr)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListAttributes rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListAttributes rows iteration error for entityID %s: %w", entityID, err)
 	}
-	return attrs, nil
+	return attrs, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateAttribute(entityID, attributeID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
@@ -615,20 +735,43 @@ func (s *PostgresStore) CreateDataSource(config DataSourceConfig) (DataSourceCon
 	return config, nil
 }
 
-func (s *PostgresStore) GetDataSources() ([]DataSourceConfig, error) {
+func (s *PostgresStore) GetDataSources(params ListParams) ([]DataSourceConfig, int64, error) {
 	var configs []DataSourceConfig
-	query := `SELECT id, name, type, connection_details, entity_id, created_at, updated_at FROM data_source_configs ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM data_source_configs"
+	baseSelectQuery := `SELECT id, name, type, connection_details, entity_id, 
+						created_at, updated_at FROM data_source_configs`
+	
+	var args []interface{}
+	// var countArgs []interface{} // If filters were added
+
+	// TODO: Implement filtering based on params.Filters if any
+	
+	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("GetDataSources failed: %w", err)
+		return nil, 0, fmt.Errorf("GetDataSources count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []DataSourceConfig{}, 0, nil
+	}
+
+	baseSelectQuery += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+	
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("GetDataSources query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var config DataSourceConfig
 		var entityID sql.NullString
-		if err := rows.Scan(&config.ID, &config.Name, &config.Type, &config.ConnectionDetails, &entityID, &config.CreatedAt, &config.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("GetDataSources row scan failed: %w", err)
+		if err := rows.Scan(&config.ID, &config.Name, &config.Type, &config.ConnectionDetails, 
+			&entityID, &config.CreatedAt, &config.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("GetDataSources row scan failed: %w", err)
 		}
 		if entityID.Valid {
 			config.EntityID = entityID.String
@@ -636,9 +779,9 @@ func (s *PostgresStore) GetDataSources() ([]DataSourceConfig, error) {
 		configs = append(configs, config)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetDataSources rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("GetDataSources rows iteration error: %w", err)
 	}
-	return configs, nil
+	return configs, totalCount, nil
 }
 
 func (s *PostgresStore) GetDataSource(id string) (DataSourceConfig, error) {
@@ -719,27 +862,52 @@ func (s *PostgresStore) CreateFieldMapping(mapping DataSourceFieldMapping) (Data
 	return mapping, nil
 }
 
-func (s *PostgresStore) GetFieldMappings(sourceID string) ([]DataSourceFieldMapping, error) {
+func (s *PostgresStore) GetFieldMappings(sourceID string, params ListParams) ([]DataSourceFieldMapping, int64, error) {
 	var mappings []DataSourceFieldMapping
-	query := `SELECT id, source_id, source_field_name, entity_id, attribute_id, transformation_rule, created_at, updated_at 
-              FROM data_source_field_mappings WHERE source_id = $1 ORDER BY source_field_name`
-	rows, err := s.DB.Query(query, sourceID)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM data_source_field_mappings WHERE source_id = $1"
+	baseSelectQuery := `SELECT id, source_id, source_field_name, entity_id, attribute_id, 
+						transformation_rule, created_at, updated_at 
+						FROM data_source_field_mappings WHERE source_id = $1`
+
+	var args []interface{}
+	var countArgs []interface{}{sourceID}
+	argCounter := 2 // Start after source_id for select query, count query already has source_id
+
+	// TODO: Implement filtering based on params.Filters if any
+	
+	err := s.DB.QueryRow(baseCountQuery, countArgs...).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("GetFieldMappings failed: %w", err)
+		return nil, 0, fmt.Errorf("GetFieldMappings count for sourceID %s failed: %w", sourceID, err)
+	}
+
+	if totalCount == 0 {
+		return []DataSourceFieldMapping{}, 0, nil
+	}
+	
+	args = append(args, sourceID) // First arg for select is source_id
+	baseSelectQuery += fmt.Sprintf(" ORDER BY source_field_name LIMIT $%d OFFSET $%d", argCounter, argCounter+1)
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("GetFieldMappings query for sourceID %s failed: %w", sourceID, err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var m DataSourceFieldMapping
-		if err := rows.Scan(&m.ID, &m.SourceID, &m.SourceFieldName, &m.EntityID, &m.AttributeID, &m.TransformationRule, &m.CreatedAt, &m.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("GetFieldMappings row scan failed: %w", err)
+		if err := rows.Scan(&m.ID, &m.SourceID, &m.SourceFieldName, &m.EntityID, 
+			&m.AttributeID, &m.TransformationRule, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("GetFieldMappings row scan for sourceID %s failed: %w", sourceID, err)
 		}
 		mappings = append(mappings, m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetFieldMappings rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("GetFieldMappings rows iteration for sourceID %s error: %w", sourceID, err)
 	}
-	return mappings, nil
+	return mappings, totalCount, nil
 }
 
 func (s *PostgresStore) GetFieldMapping(sourceID, mappingID string) (DataSourceFieldMapping, error) {
@@ -826,26 +994,49 @@ func (s *PostgresStore) GetGroupDefinition(id string) (GroupDefinition, error) {
 	return def, nil
 }
 
-func (s *PostgresStore) ListGroupDefinitions() ([]GroupDefinition, error) {
+func (s *PostgresStore) ListGroupDefinitions(params ListParams) ([]GroupDefinition, int64, error) {
 	var defs []GroupDefinition
-	query := `SELECT id, name, entity_id, rules_json, description, created_at, updated_at FROM group_definitions ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM group_definitions"
+	baseSelectQuery := `SELECT id, name, entity_id, rules_json, description, 
+						created_at, updated_at FROM group_definitions`
+	
+	var args []interface{}
+	// var countArgs []interface{} // If filters were added
+
+	// TODO: Implement filtering based on params.Filters if any
+
+	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListGroupDefinitions failed: %w", err)
+		return nil, 0, fmt.Errorf("ListGroupDefinitions count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []GroupDefinition{}, 0, nil
+	}
+
+	baseSelectQuery += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+	
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListGroupDefinitions query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var def GroupDefinition
-		if err := rows.Scan(&def.ID, &def.Name, &def.EntityID, &def.RulesJSON, &def.Description, &def.CreatedAt, &def.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("ListGroupDefinitions row scan failed: %w", err)
+		if err := rows.Scan(&def.ID, &def.Name, &def.EntityID, &def.RulesJSON, 
+			&def.Description, &def.CreatedAt, &def.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("ListGroupDefinitions row scan failed: %w", err)
 		}
 		defs = append(defs, def)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListGroupDefinitions rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListGroupDefinitions rows iteration error: %w", err)
 	}
-	return defs, nil
+	return defs, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateGroupDefinition(id string, def GroupDefinition) (GroupDefinition, error) {
@@ -920,29 +1111,52 @@ func (s *PostgresStore) GetWorkflowDefinition(id string) (WorkflowDefinition, er
 	return def, nil
 }
 
-func (s *PostgresStore) ListWorkflowDefinitions() ([]WorkflowDefinition, error) {
+func (s *PostgresStore) ListWorkflowDefinitions(params ListParams) ([]WorkflowDefinition, int64, error) {
 	var defs []WorkflowDefinition
-	query := `SELECT id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at 
-              FROM workflow_definitions ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM workflow_definitions"
+	baseSelectQuery := `SELECT id, name, description, trigger_type, trigger_config, 
+						action_sequence_json, is_enabled, created_at, updated_at 
+						FROM workflow_definitions`
+	
+	var args []interface{}
+	// var countArgs []interface{} // If filters were added
+
+	// TODO: Implement filtering based on params.Filters if any
+
+	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListWorkflowDefinitions failed: %w", err)
+		return nil, 0, fmt.Errorf("ListWorkflowDefinitions count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []WorkflowDefinition{}, 0, nil
+	}
+	
+	baseSelectQuery += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListWorkflowDefinitions query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var def WorkflowDefinition
 		if err := rows.Scan(
-			&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, &def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+			&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, 
+			&def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
-			return nil, fmt.Errorf("ListWorkflowDefinitions row scan failed: %w", err)
+			return nil, 0, fmt.Errorf("ListWorkflowDefinitions row scan failed: %w", err)
 		}
 		defs = append(defs, def)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListWorkflowDefinitions rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListWorkflowDefinitions rows iteration error: %w", err)
 	}
-	return defs, nil
+	return defs, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateWorkflowDefinition(id string, def WorkflowDefinition) (WorkflowDefinition, error) {
@@ -1015,28 +1229,51 @@ func (s *PostgresStore) GetActionTemplate(id string) (ActionTemplate, error) {
 	return tmpl, nil
 }
 
-func (s *PostgresStore) ListActionTemplates() ([]ActionTemplate, error) {
+func (s *PostgresStore) ListActionTemplates(params ListParams) ([]ActionTemplate, int64, error) {
 	var tmpls []ActionTemplate
-	query := `SELECT id, name, description, action_type, template_content, created_at, updated_at FROM action_templates ORDER BY name`
-	rows, err := s.DB.Query(query)
+	var totalCount int64
+
+	baseCountQuery := "SELECT COUNT(*) FROM action_templates"
+	baseSelectQuery := `SELECT id, name, description, action_type, template_content, 
+						created_at, updated_at FROM action_templates`
+	
+	var args []interface{}
+	// var countArgs []interface{} // If filters were added
+
+	// TODO: Implement filtering based on params.Filters if any
+	
+	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
 	if err != nil {
-		return nil, fmt.Errorf("ListActionTemplates failed: %w", err)
+		return nil, 0, fmt.Errorf("ListActionTemplates count query failed: %w", err)
+	}
+
+	if totalCount == 0 {
+		return []ActionTemplate{}, 0, nil
+	}
+
+	baseSelectQuery += " ORDER BY name LIMIT $1 OFFSET $2"
+	args = append(args, params.GetLimit(), params.GetOffset())
+
+	rows, err := s.DB.Query(baseSelectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListActionTemplates query failed: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var tmpl ActionTemplate
 		if err := rows.Scan(
-			&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, &tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt,
+			&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, 
+			&tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt,
 		); err != nil {
-			return nil, fmt.Errorf("ListActionTemplates row scan failed: %w", err)
+			return nil, 0, fmt.Errorf("ListActionTemplates row scan failed: %w", err)
 		}
 		tmpls = append(tmpls, tmpl)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListActionTemplates rows iteration error: %w", err)
+		return nil, 0, fmt.Errorf("ListActionTemplates rows iteration error: %w", err)
 	}
-	return tmpls, nil
+	return tmpls, totalCount, nil
 }
 
 func (s *PostgresStore) UpdateActionTemplate(id string, tmpl ActionTemplate) (ActionTemplate, error) {
@@ -1083,6 +1320,114 @@ func (s *PostgresStore) DeleteActionTemplate(id string) error {
 // The actual `Store` interface is defined in `api.go`, so this check can't be done here directly
 // without causing import cycles or refactoring interface definition location.
 // It will be implicitly checked at compile time if `PostgresStore` is used where `Store` is expected.
+
+// --- Bulk EntityDefinition Methods ---
+
+// BulkCreateEntities attempts to create multiple entities.
+// It processes each entity individually and reports success or failure for each.
+func (s *PostgresStore) BulkCreateEntities(entities []EntityCreateData) ([]BulkOperationResultItem, error) {
+	results := make([]BulkOperationResultItem, 0, len(entities))
+
+	for _, item := range entities {
+		result := BulkOperationResultItem{} // ID will be set upon successful creation
+
+		entity, err := s.CreateEntity(item.Name, item.Description)
+		if err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			// For create, the input item doesn't have an ID, so we can't set result.ID if creation fails.
+			// We could potentially use the Name as a temporary reference if needed, but the spec for BulkOperationResultItem has ID as omitempty.
+		} else {
+			result.Success = true
+			result.ID = entity.ID
+			result.Entity = &entity
+		}
+		results = append(results, result)
+	}
+	return results, nil // Overall method error is nil unless a catastrophic failure not tied to individual items occurs.
+}
+
+// BulkUpdateEntities attempts to update multiple entities.
+// It processes each entity individually and reports success or failure for each.
+// For partial updates, ensure that EntityUpdateData fields are pointers or use a similar mechanism
+// if empty strings are valid values and should not be skipped. Current EntityUpdateData uses omitempty,
+// so empty fields are fine for not updating.
+func (s *PostgresStore) BulkUpdateEntities(entities []EntityUpdateData) ([]BulkOperationResultItem, error) {
+	results := make([]BulkOperationResultItem, 0, len(entities))
+
+	for _, item := range entities {
+		result := BulkOperationResultItem{ID: item.ID}
+
+		// Get current entity to ensure it exists and to have its full state if needed.
+		// The current UpdateEntity method in store.go doesn't require pre-fetching
+		// if we are okay with its behavior of updating specified fields.
+		// However, to ensure we only update existing, a GetEntity check is good.
+		existingEntity, err := s.GetEntity(item.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				result.Success = false
+				result.Error = fmt.Sprintf("entity with ID %s not found", item.ID)
+			} else {
+				result.Success = false
+				result.Error = fmt.Sprintf("failed to retrieve entity %s for update: %v", item.ID, err)
+			}
+			results = append(results, result)
+			continue
+		}
+
+		// Use existing values if new ones are not provided (respecting omitempty behavior)
+		name := existingEntity.Name
+		if item.Name != "" {
+			name = item.Name
+		}
+		description := existingEntity.Description
+		if item.Description != "" { // Assuming empty string for description means "do not update" if it was previously set.
+			description = item.Description
+		}
+		
+		// The existing UpdateEntity method updates both name and description.
+		// If item.Name or item.Description is empty, it will update the field to be empty.
+		// This might not be desired for partial updates where empty means "don't change".
+		// For true partial update with current UpdateEntity, we'd pass existing values if item fields are empty.
+		updatedEntity, err := s.UpdateEntity(item.ID, name, description)
+		if err != nil {
+			result.Success = false
+			result.Error = err.Error()
+		} else {
+			result.Success = true
+			result.Entity = &updatedEntity
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+// BulkDeleteEntities attempts to delete multiple entities by their IDs.
+// It processes each ID individually and reports success or failure.
+// Deletion is considered successful if the entity was deleted or if it was already not found (idempotency).
+func (s *PostgresStore) BulkDeleteEntities(entityIDs []string) ([]BulkOperationResultItem, error) {
+	results := make([]BulkOperationResultItem, 0, len(entityIDs))
+
+	for _, id := range entityIDs {
+		result := BulkOperationResultItem{ID: id}
+		err := s.DeleteEntity(id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Considered success for idempotency: entity already deleted or never existed.
+				result.Success = true
+				result.Error = "entity not found (considered successful as it's already gone)"
+			} else {
+				result.Success = false
+				result.Error = err.Error()
+			}
+		} else {
+			result.Success = true
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
 
 func (s *PostgresStore) Close() error {
 	if s.DB != nil {

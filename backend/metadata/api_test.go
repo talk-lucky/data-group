@@ -158,10 +158,48 @@ func TestListEntitiesHandler(t *testing.T) {
 
 	w := performRequest(testRouter, "GET", "/api/v1/entities/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+	var resp ListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	
 	var entities []EntityDefinition
-	err := json.Unmarshal(w.Body.Bytes(), &entities)
-	assert.NoError(t, err)
+	entitiesBytes, _ := json.Marshal(resp.Data) // Marshal and Unmarshal Data to []EntityDefinition
+	err = json.Unmarshal(entitiesBytes, &entities)
+	require.NoError(t, err)
 	assert.Len(t, entities, 2)
+
+	// Test pagination: limit
+	w = performRequest(testRouter, "GET", "/api/v1/entities/?limit=1", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total, "Total should still be 2 with limit")
+	entitiesBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(entitiesBytes, &entities)
+	require.NoError(t, err)
+	assert.Len(t, entities, 1, "Data should be limited to 1")
+
+	// Test pagination: offset and limit
+	_, _ = testStore.CreateEntity("Entity 3", "Desc 3") // Total 3 entities now
+	w = performRequest(testRouter, "GET", "/api/v1/entities/?offset=1&limit=1", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), resp.Total)
+	entitiesBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(entitiesBytes, &entities)
+	require.NoError(t, err)
+	assert.Len(t, entities, 1)
+	assert.Equal(t, "Entity 2", entities[0].Name) // Assuming default order is by name or creation time
+
+	// Test invalid limit/offset (e.g., negative)
+	w = performRequest(testRouter, "GET", "/api/v1/entities/?limit=-1", nil, nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var apiErr APIError
+	err = json.Unmarshal(w.Body.Bytes(), &apiErr)
+	require.NoError(t, err)
+	assert.Contains(t, apiErr.Message, "Invalid limit parameter")
 }
 
 func TestGetEntityHandler(t *testing.T) {
@@ -319,26 +357,60 @@ func TestListEntityRelationshipsHandler(t *testing.T) {
 	require.NoError(t, err)
 
 
-	// Test listing all
+	// Test listing all - initial state
 	w := performRequest(testRouter, "GET", "/api/v1/entity-relationships/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	var responseBody struct {
-		Data  []EntityRelationshipDefinition `json:"data"`
-		Total int64                          `json:"total"`
-	}
-	err = json.Unmarshal(w.Body.Bytes(), &responseBody)
-	assert.NoError(t, err)
-	assert.Len(t, responseBody.Data, 2)
-	assert.Equal(t, int64(2), responseBody.Total)
+	var resp ListResponse
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	var rels []EntityRelationshipDefinition
+	relsBytes, _ := json.Marshal(resp.Data)
+	err = json.Unmarshal(relsBytes, &rels)
+	require.NoError(t, err)
+	assert.Len(t, rels, 2)
+
+	// Test pagination: limit=1
+	w = performRequest(testRouter, "GET", "/api/v1/entity-relationships/?limit=1", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	relsBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(relsBytes, &rels)
+	require.NoError(t, err)
+	assert.Len(t, rels, 1)
 
 	// Test filtering by source_entity_id
 	w = performRequest(testRouter, "GET", fmt.Sprintf("/api/v1/entity-relationships/?source_entity_id=%s", userEntity.ID), nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	err = json.Unmarshal(w.Body.Bytes(), &responseBody)
-	assert.NoError(t, err)
-	assert.Len(t, responseBody.Data, 1)
-	assert.Equal(t, int64(1), responseBody.Total) // Assuming the handler correctly calculates total for filtered results
-	assert.Equal(t, "UserPostsList1", responseBody.Data[0].Name)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), resp.Total) // Store's ListEntityRelationships now calculates total for filtered results
+	relsBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(relsBytes, &rels)
+	require.NoError(t, err)
+	assert.Len(t, rels, 1)
+	assert.Equal(t, "UserPostsList1", rels[0].Name)
+
+	// Test filtering by source_entity_id with pagination
+	w = performRequest(testRouter, "GET", fmt.Sprintf("/api/v1/entity-relationships/?source_entity_id=%s&limit=1&offset=0", userEntity.ID), nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), resp.Total)
+	relsBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(relsBytes, &rels)
+	require.NoError(t, err)
+	assert.Len(t, rels, 1)
+	
+	// Test filtering with non-existent source_entity_id
+	w = performRequest(testRouter, "GET", "/api/v1/entity-relationships/?source_entity_id=non-existent", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code) // Should still be OK, but with 0 results
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), resp.Total)
+	assert.Empty(t, resp.Data)
 }
 
 func TestUpdateEntityRelationshipHandler(t *testing.T) {
@@ -442,10 +514,28 @@ func TestListAttributesHandler(t *testing.T) {
 
 	w := performRequest(testRouter, "GET", "/api/v1/entities/"+entity.ID+"/attributes/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+	var resp ListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), resp.Total)
 	var attrs []AttributeDefinition
-	err := json.Unmarshal(w.Body.Bytes(), &attrs)
-	assert.NoError(t, err)
+	attrsBytes, _ := json.Marshal(resp.Data)
+	err = json.Unmarshal(attrsBytes, &attrs)
+	require.NoError(t, err)
 	assert.Len(t, attrs, 1)
+
+	// Add another attribute for pagination test
+	_, _ = testStore.CreateAttribute(entity.ID, "Attr2", "integer", "Desc2", true, false, true)
+	w = performRequest(testRouter, "GET", "/api/v1/entities/"+entity.ID+"/attributes/?limit=1&offset=1", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	attrsBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(attrsBytes, &attrs)
+	require.NoError(t, err)
+	assert.Len(t, attrs, 1)
+	assert.Equal(t, "Attr2", attrs[0].Name) // Assuming order by name or creation
 }
 
 func TestGetAttributeHandler(t *testing.T) {
@@ -544,21 +634,38 @@ func TestListDataSourceConfigsHandler(t *testing.T) {
 	// Test empty list
 	w := performRequest(testRouter, "GET", "/api/v1/datasources/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	var emptyDs []DataSourceConfig
-	err := json.Unmarshal(w.Body.Bytes(), &emptyDs)
-	assert.NoError(t, err)
-	assert.Len(t, emptyDs, 0)
+	var resp ListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), resp.Total)
+	assert.Empty(t, resp.Data)
 
 	// Create some data sources
-	_, _ = testStore.CreateDataSource(DataSourceConfig{Name: "DS1", Type: "PostgreSQL", ConnectionDetails: "{}", EntityID: ""})
+	ds1, _ := testStore.CreateDataSource(DataSourceConfig{Name: "DS1", Type: "PostgreSQL", ConnectionDetails: "{}", EntityID: ""})
 	_, _ = testStore.CreateDataSource(DataSourceConfig{Name: "DS2", Type: "CSV", ConnectionDetails: "{}", EntityID: ""})
 
 	w = performRequest(testRouter, "GET", "/api/v1/datasources/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
 	var dss []DataSourceConfig
-	err = json.Unmarshal(w.Body.Bytes(), &dss)
-	assert.NoError(t, err)
+	dssBytes, _ := json.Marshal(resp.Data)
+	err = json.Unmarshal(dssBytes, &dss)
+	require.NoError(t, err)
 	assert.Len(t, dss, 2)
+
+	// Test pagination
+	w = performRequest(testRouter, "GET", "/api/v1/datasources/?limit=1&offset=0", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	dssBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(dssBytes, &dss)
+	require.NoError(t, err)
+	assert.Len(t, dss, 1)
+	assert.Equal(t, ds1.Name, dss[0].Name) // Assuming order by name or creation
 }
 
 func TestGetDataSourceConfigHandler(t *testing.T) {
@@ -698,13 +805,14 @@ func TestListFieldMappingsHandler(t *testing.T) {
 	// Test empty list
 	w := performRequest(testRouter, "GET", url, nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	var fms []DataSourceFieldMapping
-	err := json.Unmarshal(w.Body.Bytes(), &fms)
-	assert.NoError(t, err)
-	assert.Len(t, fms, 0)
+	var resp ListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), resp.Total)
+	assert.Empty(t, resp.Data)
 
 	// Create a mapping
-	_, err = testStore.CreateFieldMapping(DataSourceFieldMapping{
+	fm1, err := testStore.CreateFieldMapping(DataSourceFieldMapping{
 		SourceID:        dataSource.ID,
 		SourceFieldName: "col1",
 		EntityID:        entity.ID,
@@ -714,10 +822,29 @@ func TestListFieldMappingsHandler(t *testing.T) {
 
 	w = performRequest(testRouter, "GET", url, nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	err = json.Unmarshal(w.Body.Bytes(), &fms)
-	assert.NoError(t, err)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), resp.Total)
+	var fms []DataSourceFieldMapping
+	fmsBytes, _ := json.Marshal(resp.Data)
+	err = json.Unmarshal(fmsBytes, &fms)
+	require.NoError(t, err)
 	assert.Len(t, fms, 1)
 	assert.Equal(t, "col1", fms[0].SourceFieldName)
+
+	// Test pagination
+	_, _ = testStore.CreateFieldMapping(DataSourceFieldMapping{SourceID: dataSource.ID, SourceFieldName: "col2", EntityID: entity.ID, AttributeID: attribute.ID})
+	w = performRequest(testRouter, "GET", url+"?limit=1&offset=0", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	fmsBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(fmsBytes, &fms)
+	require.NoError(t, err)
+	assert.Len(t, fms, 1)
+	assert.Equal(t, fm1.SourceFieldName, fms[0].SourceFieldName)
+
 
 	// Test list for non-existent source_id
 	invalidUrl := fmt.Sprintf("/api/v1/datasources/%s/mappings/", "nonexistent-source-id")
@@ -885,20 +1012,38 @@ func TestListScheduleDefinitionsHandler(t *testing.T) {
 	// Test empty list
 	w := performRequest(testRouter, "GET", "/api/v1/schedules/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	var schedules []ScheduleDefinition
-	err := json.Unmarshal(w.Body.Bytes(), &schedules)
-	assert.NoError(t, err)
-	assert.Len(t, schedules, 0)
+	var resp ListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), resp.Total)
+	assert.Empty(t, resp.Data)
 
 	// Create some schedules directly via store for setup
-	_, _ = testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Schedule A", CronExpression: "0 * * * *", TaskType: "typeA", TaskParameters: "{}"})
+	s1, _ := testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Schedule A", CronExpression: "0 * * * *", TaskType: "typeA", TaskParameters: "{}"})
 	_, _ = testStore.CreateScheduleDefinition(ScheduleDefinition{Name: "Schedule B", CronExpression: "30 * * * *", TaskType: "typeB", TaskParameters: "{}"})
 
 	w = performRequest(testRouter, "GET", "/api/v1/schedules/", nil, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
-	err = json.Unmarshal(w.Body.Bytes(), &schedules)
-	assert.NoError(t, err)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	var schedules []ScheduleDefinition
+	schedulesBytes, _ := json.Marshal(resp.Data)
+	err = json.Unmarshal(schedulesBytes, &schedules)
+	require.NoError(t, err)
 	assert.Len(t, schedules, 2)
+
+	// Test pagination
+	w = performRequest(testRouter, "GET", "/api/v1/schedules/?limit=1&offset=0", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.Total)
+	schedulesBytes, _ = json.Marshal(resp.Data)
+	err = json.Unmarshal(schedulesBytes, &schedules)
+	require.NoError(t, err)
+	assert.Len(t, schedules, 1)
+	assert.Equal(t, s1.Name, schedules[0].Name) // Assuming default order is by name
 }
 
 func TestGetScheduleDefinitionHandler(t *testing.T) {
@@ -968,4 +1113,184 @@ func TestDeleteScheduleDefinitionHandler(t *testing.T) {
 	// Test deletion with non-existent ID
 	w = performRequest(testRouter, "DELETE", "/api/v1/schedules/nonexistent-id", nil, nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TODO: Add tests for ListWorkflowDefinitionsHandler pagination and ListActionTemplatesHandler pagination
+// (similar to TestListScheduleDefinitionsHandler) if those endpoints are intended to be paginated.
+
+// --- Bulk Entity Operation API Tests (New) ---
+
+func TestBulkCreateEntitiesAPI(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	t.Run("SuccessfulBulkCreate", func(t *testing.T) {
+		payload := `{"entities": [
+			{"name": "BulkAPIEntity1", "description": "Desc1"},
+			{"name": "BulkAPIEntity2", "description": "Desc2"}
+		]}`
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-create", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusCreated, w.Code) // All success = 201
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+		for _, item := range resp.Results {
+			assert.True(t, item.Success)
+			assert.NotEmpty(t, item.ID)
+			assert.NotNil(t, item.Entity)
+			assert.Empty(t, item.Error)
+			// Verify entity in DB
+			_, getErr := testStore.GetEntity(item.ID)
+			assert.NoError(t, getErr)
+		}
+	})
+
+	t.Run("PartialSuccessBulkCreate", func(t *testing.T) {
+		// Setup: one entity that will cause a unique constraint violation
+		_, err := testStore.CreateEntity("BulkAPIEntityUnique", "Pre-existing")
+		require.NoError(t, err)
+
+		payload := `{"entities": [
+			{"name": "BulkAPIEntityNew", "description": "New one"},
+			{"name": "BulkAPIEntityUnique", "description": "Attempt duplicate name"}
+		]}`
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-create", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusMultiStatus, w.Code) // Partial success = 207
+		var resp BulkOperationResponse
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+
+		assert.True(t, resp.Results[0].Success)
+		assert.Equal(t, "BulkAPIEntityNew", resp.Results[0].Entity.Name)
+
+		assert.False(t, resp.Results[1].Success)
+		assert.Contains(t, resp.Results[1].Error, "UNIQUE constraint failed") // SQLite specific
+		assert.Nil(t, resp.Results[1].Entity)
+	})
+
+	t.Run("InvalidPayloadBulkCreate", func(t *testing.T) {
+		payload := `{"entities": [{"description": "Missing Name"}]}` // Name is required
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-create", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		var apiErr APIError
+		err := json.Unmarshal(w.Body.Bytes(), &apiErr)
+		require.NoError(t, err)
+		assert.Contains(t, apiErr.Message, "Invalid input")
+	})
+	
+	t.Run("EmptyEntitiesListBulkCreate", func(t *testing.T) {
+		payload := `{"entities": []}`
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-create", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusOK, w.Code) // API handler returns 200 for empty list
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		assert.Empty(t, resp.Results)
+	})
+}
+
+func TestBulkUpdateEntitiesAPI(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	e1, _ := testStore.CreateEntity("BulkUpdateE1", "OrigD1")
+	e2, _ := testStore.CreateEntity("BulkUpdateE2", "OrigD2")
+
+	t.Run("SuccessfulBulkUpdate", func(t *testing.T) {
+		payload := fmt.Sprintf(`{"entities": [
+			{"id": "%s", "name": "UpdatedName1"},
+			{"id": "%s", "description": "UpdatedDesc2"}
+		]}`, e1.ID, e2.ID)
+		w := performRequest(testRouter, "PUT", "/api/v1/entities/bulk-update", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusOK, w.Code) // All success = 200
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+
+		assert.True(t, resp.Results[0].Success)
+		assert.Equal(t, e1.ID, resp.Results[0].ID)
+		assert.Equal(t, "UpdatedName1", resp.Results[0].Entity.Name)
+		assert.Equal(t, "OrigD1", resp.Results[0].Entity.Description) // Description should remain
+
+		assert.True(t, resp.Results[1].Success)
+		assert.Equal(t, e2.ID, resp.Results[1].ID)
+		assert.Equal(t, "BulkUpdateE2", resp.Results[1].Entity.Name) // Name should remain
+		assert.Equal(t, "UpdatedDesc2", resp.Results[1].Entity.Description)
+	})
+
+	t.Run("PartialSuccessBulkUpdate", func(t *testing.T) {
+		payload := fmt.Sprintf(`{"entities": [
+			{"id": "%s", "name": "FurtherUpdate1"},
+			{"id": "non-existent-id", "description": "NoEntityHere"}
+		]}`, e1.ID)
+		w := performRequest(testRouter, "PUT", "/api/v1/entities/bulk-update", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusMultiStatus, w.Code)
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+
+		assert.True(t, resp.Results[0].Success)
+		assert.Equal(t, "FurtherUpdate1", resp.Results[0].Entity.Name)
+
+		assert.False(t, resp.Results[1].Success)
+		assert.Equal(t, "non-existent-id", resp.Results[1].ID)
+		assert.Contains(t, resp.Results[1].Error, "not found")
+	})
+
+	t.Run("InvalidPayloadBulkUpdate", func(t *testing.T) {
+		payload := `{"entities": [{"name": "MissingID"}]}` // ID is required for update
+		w := performRequest(testRouter, "PUT", "/api/v1/entities/bulk-update", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
+func TestBulkDeleteEntitiesAPI(t *testing.T) {
+	require.NoError(t, clearAllTables(testStore), "Failed to clear tables before test")
+
+	e1, _ := testStore.CreateEntity("BulkDeleteE1", "ToDelete1")
+	e2, _ := testStore.CreateEntity("BulkDeleteE2", "ToDelete2")
+
+	t.Run("SuccessfulBulkDelete", func(t *testing.T) {
+		payload := fmt.Sprintf(`{"entity_ids": ["%s", "%s"]}`, e1.ID, e2.ID)
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-delete", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusOK, w.Code) // All success (idempotent)
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+		for _, item := range resp.Results {
+			assert.True(t, item.Success)
+		}
+		_, getErr := testStore.GetEntity(e1.ID)
+		assert.ErrorIs(t, getErr, sql.ErrNoRows)
+		_, getErr = testStore.GetEntity(e2.ID)
+		assert.ErrorIs(t, getErr, sql.ErrNoRows)
+	})
+
+	t.Run("PartialSuccessBulkDelete", func(t *testing.T) {
+		// e1 and e2 are already deleted from previous sub-test. Create a new one.
+		e3, _ := testStore.CreateEntity("BulkDeleteE3", "ToDelete3")
+		payload := fmt.Sprintf(`{"entity_ids": ["%s", "non-existent-id"]}`, e3.ID)
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-delete", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusOK, w.Code) // Still 200 OK because non-existent is idempotent success
+		var resp BulkOperationResponse
+		err := json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err)
+		require.Len(t, resp.Results, 2)
+		
+		assert.True(t, resp.Results[0].Success) // e3 deleted
+		assert.Equal(t, e3.ID, resp.Results[0].ID)
+
+		assert.True(t, resp.Results[1].Success) // non-existent is success
+		assert.Equal(t, "non-existent-id", resp.Results[1].ID)
+		assert.Contains(t, resp.Results[1].Error, "not found") // Informational error
+	})
+
+	t.Run("InvalidPayloadBulkDelete", func(t *testing.T) {
+		payload := `{"entity_ids": "not-an-array"}`
+		w := performRequest(testRouter, "POST", "/api/v1/entities/bulk-delete", strings.NewReader(payload), nil)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
 }
