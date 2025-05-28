@@ -45,19 +45,19 @@ func seedTestData(t *testing.T, store *PostgresStore) {
 	require.NotEmpty(t, targetEntity.ID)
 
 	// Create Source Attribute (e.g., User.ID - assuming it's a string/text type for UUID)
-	_, err = store.CreateAttribute(sourceEntity.ID, "ID", "string", "User Primary Key", false, false, true)
+	_, err = store.CreateAttribute(sourceEntity.ID, "ID", BaseTypeString, nil, "User Primary Key", false, false, true)
 	require.NoError(t, err)
 
 	// Create Target Attribute (e.g., Order.UserID - assuming it's a string/text type for UUID FK)
-	_, err = store.CreateAttribute(targetEntity.ID, "UserID", "string", "Order Foreign Key to User", false, false, true)
+	_, err = store.CreateAttribute(targetEntity.ID, "UserID", BaseTypeString, nil, "Order Foreign Key to User", false, false, true)
 	require.NoError(t, err)
 
 	// Create another attribute on target for different relationship
-	_, err = store.CreateAttribute(targetEntity.ID, "ID", "string", "Order Primary Key", false, false, true)
+	_, err = store.CreateAttribute(targetEntity.ID, "ID", BaseTypeString, nil, "Order Primary Key", false, false, true)
 	require.NoError(t, err)
 
 	// Create another attribute on source for different relationship
-	_, err = store.CreateAttribute(sourceEntity.ID, "OrderID", "string", "User Foreign Key to Order", false, false, true)
+	_, err = store.CreateAttribute(sourceEntity.ID, "OrderID", BaseTypeString, nil, "User Foreign Key to Order", false, false, true)
 	require.NoError(t, err)
 
 }
@@ -132,6 +132,21 @@ func TestEntityRelationshipCRUD(t *testing.T) {
 		// SQLite error for unique constraint is often "UNIQUE constraint failed: table.column"
 		// PostgreSQL error is "violates unique constraint"
 		assert.Contains(t, err.Error(), "UNIQUE constraint failed", "Error message should indicate unique constraint violation")
+
+		// Test creating with ManyToMany
+		erDefManyToMany := EntityRelationshipDefinition{
+			Name:              "UserGroupsLink", // Different name for uniqueness
+			Description:       "Links users to groups (M2M)",
+			SourceEntityID:    userEntity.ID,
+			SourceAttributeID: userPkAttr.ID,
+			TargetEntityID:    orderEntity.ID, // Reusing Order entity as a stand-in for Group entity for simplicity
+			TargetAttributeID: orderFkToUserAttr.ID, // Adjust if Order entity has a different PK for this context
+			RelationshipType:  ManyToMany,
+		}
+		createdM2M, errM2M := store.CreateEntityRelationship(erDefManyToMany)
+		require.NoError(t, errM2M)
+		assert.NotEmpty(t, createdM2M.ID)
+		assert.Equal(t, ManyToMany, createdM2M.RelationshipType)
 	})
 
 	t.Run("GetEntityRelationship", func(t *testing.T) {
@@ -220,7 +235,7 @@ func TestEntityRelationshipCRUD(t *testing.T) {
 		updatedPayload := created
 		updatedPayload.Name = "Updated Name"
 		updatedPayload.Description = "After Update"
-		updatedPayload.RelationshipType = OneToMany
+		updatedPayload.RelationshipType = OneToMany // Original update test
 
 		updated, err := store.UpdateEntityRelationship(created.ID, updatedPayload)
 		require.NoError(t, err)
@@ -228,6 +243,18 @@ func TestEntityRelationshipCRUD(t *testing.T) {
 		assert.Equal(t, "After Update", updated.Description)
 		assert.Equal(t, OneToMany, updated.RelationshipType)
 		assert.NotEqual(t, created.UpdatedAt, updated.UpdatedAt)
+		
+		// Test updating to ManyToMany
+		updatedPayloadM2M := updated
+		updatedPayloadM2M.Name = "Updated ToM2M Name"
+		updatedPayloadM2M.RelationshipType = ManyToMany
+		
+		updatedM2M, errM2M := store.UpdateEntityRelationship(created.ID, updatedPayloadM2M)
+		require.NoError(t, errM2M)
+		assert.Equal(t, "Updated ToM2M Name", updatedM2M.Name)
+		assert.Equal(t, ManyToMany, updatedM2M.RelationshipType)
+		assert.NotEqual(t, updated.UpdatedAt, updatedM2M.UpdatedAt)
+
 
 		_, err = store.UpdateEntityRelationship("non-existent-id", updatedPayload)
 		assert.ErrorIs(t, err, sql.ErrNoRows)
@@ -293,6 +320,119 @@ func TestEntityRelationshipCRUD(t *testing.T) {
 // For unique constraint: PG: "violates unique constraint", SQLite: "UNIQUE constraint failed"
 // For FK constraint: PG: "violates foreign key constraint", SQLite: "FOREIGN KEY constraint failed"
 // These differences are handled in the test assertions where appropriate.
+
+func TestAttributeCRUD(t *testing.T) {
+	if os.Getenv("CI") != "" {
+		t.Skip("Skipping database-dependent tests in CI environment.")
+	}
+	store := setupTestDB(t) // Uses existing setupTestDB which seeds User and Order entities
+	defer store.Close()
+
+	// Get the "User" entity created by seedTestData
+	entities, _, err := store.ListEntities(ListParams{Limit: 10, Filters: map[string]interface{}{"name": "User"}})
+	require.NoError(t, err)
+	require.NotEmpty(t, entities, "User entity not found from seed")
+	userEntity := entities[0]
+
+	attrDetails := map[string]interface{}{"maxLength": 255}
+	enumDetails := map[string]interface{}{"values": []string{"ACTIVE", "INACTIVE", "PENDING"}}
+
+	var createdAttr, createdEnumAttr AttributeDefinition
+
+	t.Run("CreateAttribute", func(t *testing.T) {
+		createdAttr, err = store.CreateAttribute(userEntity.ID, "UserEmail", BaseTypeString, attrDetails, "User primary email", true, true, true)
+		require.NoError(t, err)
+		assert.NotEmpty(t, createdAttr.ID)
+		assert.Equal(t, "UserEmail", createdAttr.Name)
+		assert.Equal(t, BaseTypeString, createdAttr.DataTypeName)
+		assert.Equal(t, attrDetails, createdAttr.DataTypeDetails)
+		assert.True(t, createdAttr.IsPii)
+
+		createdEnumAttr, err = store.CreateAttribute(userEntity.ID, "UserStatus", BaseTypeEnum, enumDetails, "User account status", true, false, true)
+		require.NoError(t, err)
+		assert.NotEmpty(t, createdEnumAttr.ID)
+		assert.Equal(t, "UserStatus", createdEnumAttr.Name)
+		assert.Equal(t, BaseTypeEnum, createdEnumAttr.DataTypeName)
+		assert.Equal(t, enumDetails, createdEnumAttr.DataTypeDetails)
+
+		// Test creating attribute with nil details
+		_, err = store.CreateAttribute(userEntity.ID, "UserBio", BaseTypeString, nil, "User biography", false, false, false)
+		require.NoError(t, err)
+	})
+
+	t.Run("GetAttribute", func(t *testing.T) {
+		fetchedAttr, err := store.GetAttribute(userEntity.ID, createdAttr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, createdAttr.ID, fetchedAttr.ID)
+		assert.Equal(t, "UserEmail", fetchedAttr.Name)
+		assert.Equal(t, BaseTypeString, fetchedAttr.DataTypeName)
+		assert.Equal(t, attrDetails, fetchedAttr.DataTypeDetails)
+
+		fetchedEnumAttr, err := store.GetAttribute(userEntity.ID, createdEnumAttr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, createdEnumAttr.ID, fetchedEnumAttr.ID)
+		assert.Equal(t, "UserStatus", fetchedEnumAttr.Name)
+		assert.Equal(t, BaseTypeEnum, fetchedEnumAttr.DataTypeName)
+		// Need to assert equality of map content carefully for details
+		assert.IsType(t, map[string]interface{}{}, fetchedEnumAttr.DataTypeDetails)
+		fetchedValues, ok := fetchedEnumAttr.DataTypeDetails["values"].([]interface{})
+		require.True(t, ok, "Enum values should be a slice of interfaces")
+		expectedValues := []string{"ACTIVE", "INACTIVE", "PENDING"}
+		require.Len(t, fetchedValues, len(expectedValues))
+		for i, v := range fetchedValues {
+			assert.Equal(t, expectedValues[i], v.(string))
+		}
+	})
+
+	t.Run("UpdateAttribute", func(t *testing.T) {
+		updatedDescription := "Updated user primary email address"
+		updatedDetails := map[string]interface{}{"pattern": "^[\\w-\\.]+@([\\w-]+\\.)+[\\w-]{2,4}$"}
+		updatedAttr, err := store.UpdateAttribute(userEntity.ID, createdAttr.ID, "UserEmailUpdated", BaseTypeString, updatedDetails, updatedDescription, true, true, false)
+		require.NoError(t, err)
+		assert.Equal(t, "UserEmailUpdated", updatedAttr.Name)
+		assert.Equal(t, updatedDescription, updatedAttr.Description)
+		assert.Equal(t, updatedDetails, updatedAttr.DataTypeDetails)
+		assert.False(t, updatedAttr.IsIndexed, "IsIndexed should be updated to false")
+
+		// Verify by fetching again
+		fetchedAfterUpdate, err := store.GetAttribute(userEntity.ID, createdAttr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "UserEmailUpdated", fetchedAfterUpdate.Name)
+		assert.Equal(t, updatedDetails, fetchedAfterUpdate.DataTypeDetails)
+	})
+
+	t.Run("ListAttributes", func(t *testing.T) {
+		// User entity should have "ID", "OrderID", "UserEmail", "UserStatus", "UserBio" attributes now
+		// (ID and OrderID from seedData, others from this test)
+		attrs, total, err := store.ListAttributes(userEntity.ID, ListParams{Limit: 10})
+		require.NoError(t, err)
+		assert.Equal(t, int64(5), total) // User.ID, User.OrderID, UserEmail, UserStatus, UserBio
+		assert.Len(t, attrs, 5)
+
+		foundEmail := false
+		foundStatus := false
+		for _, attr := range attrs {
+			if attr.Name == "UserEmailUpdated" { // After update
+				foundEmail = true
+				assert.Equal(t, BaseTypeString, attr.DataTypeName)
+				assert.IsType(t, map[string]interface{}{}, attr.DataTypeDetails) // Check type before accessing
+				if pattern, ok := attr.DataTypeDetails["pattern"].(string); ok {
+					assert.Equal(t, "^[\\w-\\.]+@([\\w-]+\\.)+[\\w-]{2,4}$", pattern)
+				} else {
+					t.Errorf("Pattern not found or not a string in DataTypeDetails for UserEmailUpdated: %v", attr.DataTypeDetails)
+				}
+			}
+			if attr.Name == "UserStatus" {
+				foundStatus = true
+				assert.Equal(t, BaseTypeEnum, attr.DataTypeName)
+				assert.Equal(t, enumDetails, attr.DataTypeDetails)
+			}
+		}
+		assert.True(t, foundEmail, "UserEmail attribute not found in list")
+		assert.True(t, foundStatus, "UserStatus attribute not found in list")
+	})
+}
+
 
 func TestListEntitiesPagination(t *testing.T) {
 	if os.Getenv("CI") != "" {

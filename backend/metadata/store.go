@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"encoding/json" // Added for handling DataTypeDetails
 	"github.com/google/uuid"
 	"strings"
 
@@ -54,6 +55,7 @@ func (s *PostgresStore) initSchema() error {
 			id TEXT PRIMARY KEY,
 			name VARCHAR(255) NOT NULL UNIQUE,
 			description TEXT,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
@@ -63,8 +65,10 @@ func (s *PostgresStore) initSchema() error {
 			id TEXT PRIMARY KEY,
 			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
 			name VARCHAR(255) NOT NULL,
-			data_type VARCHAR(100) NOT NULL,
+			data_type_name VARCHAR(255) NOT NULL, 
+			data_type_details JSONB,             
 			description TEXT,
+			metadata JSONB NULL,
 			is_filterable BOOLEAN DEFAULT FALSE,
 			is_pii BOOLEAN DEFAULT FALSE,
 			is_indexed BOOLEAN DEFAULT FALSE,
@@ -80,7 +84,8 @@ func (s *PostgresStore) initSchema() error {
 			name VARCHAR(255) NOT NULL UNIQUE,
 			type VARCHAR(100) NOT NULL,
 			connection_details TEXT,
-			entity_id TEXT REFERENCES entity_definitions(id) ON DELETE SET NULL, -- Can be null if not directly tied to one entity
+			entity_id TEXT REFERENCES entity_definitions(id) ON DELETE SET NULL, 
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
@@ -94,6 +99,7 @@ func (s *PostgresStore) initSchema() error {
 			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
 			attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
 			transformation_rule TEXT,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL,
 			UNIQUE (source_id, source_field_name, attribute_id)
@@ -107,6 +113,7 @@ func (s *PostgresStore) initSchema() error {
 			entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
 			rules_json TEXT,
 			description TEXT,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
@@ -121,6 +128,7 @@ func (s *PostgresStore) initSchema() error {
 			trigger_config TEXT,
 			action_sequence_json TEXT,
 			is_enabled BOOLEAN DEFAULT TRUE,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
@@ -132,6 +140,7 @@ func (s *PostgresStore) initSchema() error {
 			description TEXT,
 			action_type VARCHAR(100),
 			template_content TEXT,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`,
@@ -145,6 +154,7 @@ func (s *PostgresStore) initSchema() error {
 			task_type TEXT NOT NULL,
 			task_parameters JSONB NOT NULL,
 			is_enabled BOOLEAN DEFAULT FALSE,
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
@@ -160,7 +170,8 @@ func (s *PostgresStore) initSchema() error {
 			source_attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
 			target_entity_id TEXT NOT NULL REFERENCES entity_definitions(id) ON DELETE CASCADE,
 			target_attribute_id TEXT NOT NULL REFERENCES attribute_definitions(id) ON DELETE CASCADE,
-			relationship_type VARCHAR(50) NOT NULL, -- ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE
+			relationship_type VARCHAR(50) NOT NULL, 
+			metadata JSONB NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL,
 			UNIQUE (name, source_entity_id, target_entity_id)
@@ -184,18 +195,29 @@ func (s *PostgresStore) initSchema() error {
 
 // --- EntityDefinition Methods ---
 
-func (s *PostgresStore) CreateEntity(name, description string) (EntityDefinition, error) {
+func (s *PostgresStore) CreateEntity(name, description string, metadata map[string]interface{}) (EntityDefinition, error) {
 	now := time.Now().UTC()
 	entity := EntityDefinition{
 		ID:          uuid.NewString(),
 		Name:        name,
 		Description: description,
+		Metadata:    metadata,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	query := `INSERT INTO entity_definitions (id, name, description, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5)`
-	_, err := s.DB.Exec(query, entity.ID, entity.Name, entity.Description, entity.CreatedAt, entity.UpdatedAt)
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return EntityDefinition{}, fmt.Errorf("CreateEntity failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" { // Handle nil map explicitly for DB
+		metadataJSON = nil
+	}
+
+
+	query := `INSERT INTO entity_definitions (id, name, description, metadata, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err = s.DB.Exec(query, entity.ID, entity.Name, entity.Description, metadataJSON, entity.CreatedAt, entity.UpdatedAt)
 	if err != nil {
 		return EntityDefinition{}, fmt.Errorf("CreateEntity failed: %w", err)
 	}
@@ -204,13 +226,19 @@ func (s *PostgresStore) CreateEntity(name, description string) (EntityDefinition
 
 func (s *PostgresStore) GetEntity(id string) (EntityDefinition, error) {
 	var entity EntityDefinition
-	query := `SELECT id, name, description, created_at, updated_at FROM entity_definitions WHERE id = $1`
-	err := s.DB.QueryRow(query, id).Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt)
+	var metadataJSON sql.NullString
+	query := `SELECT id, name, description, metadata, created_at, updated_at FROM entity_definitions WHERE id = $1`
+	err := s.DB.QueryRow(query, id).Scan(&entity.ID, &entity.Name, &entity.Description, &metadataJSON, &entity.CreatedAt, &entity.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EntityDefinition{}, sql.ErrNoRows
 		}
 		return EntityDefinition{}, fmt.Errorf("GetEntity failed: %w", err)
+	}
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &entity.Metadata); err != nil {
+			return EntityDefinition{}, fmt.Errorf("GetEntity failed to unmarshal metadata: %w", err)
+		}
 	}
 	return entity, nil
 }
@@ -219,25 +247,12 @@ func (s *PostgresStore) ListEntities(params ListParams) ([]EntityDefinition, int
 	var entities []EntityDefinition
 	var totalCount int64
 
-	// Base query for counting
 	countQueryStr := "SELECT COUNT(*) FROM entity_definitions"
-	// Base query for selecting data
-	selectQueryStr := "SELECT id, name, description, created_at, updated_at FROM entity_definitions"
+	selectQueryStr := "SELECT id, name, description, metadata, created_at, updated_at FROM entity_definitions"
 
-	// args will hold query parameters
 	var args []interface{}
 	var countArgs []interface{}
 
-	// TODO: Implement filtering based on params.Filters if any
-	// Example: if nameFilter, ok := params.Filters["name"].(string); ok && nameFilter != "" {
-	//    countQueryStr += " WHERE name ILIKE $1"
-	//    selectQueryStr += " WHERE name ILIKE $1"
-	//    countArgs = append(countArgs, "%"+nameFilter+"%")
-	//    args = append(args, "%"+nameFilter+"%")
-	// }
-
-
-	// Get total count
 	err := s.DB.QueryRow(countQueryStr, countArgs...).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListEntities count query failed: %w", err)
@@ -247,7 +262,6 @@ func (s *PostgresStore) ListEntities(params ListParams) ([]EntityDefinition, int
 		return []EntityDefinition{}, 0, nil
 	}
 
-	// Add ordering, limit, and offset for selecting data
 	selectQueryStr += " ORDER BY name LIMIT $1 OFFSET $2"
 	args = append(args, params.GetLimit(), params.GetOffset())
 
@@ -259,8 +273,14 @@ func (s *PostgresStore) ListEntities(params ListParams) ([]EntityDefinition, int
 
 	for rows.Next() {
 		var entity EntityDefinition
-		if err := rows.Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt); err != nil {
+		var metadataJSON sql.NullString
+		if err := rows.Scan(&entity.ID, &entity.Name, &entity.Description, &metadataJSON, &entity.CreatedAt, &entity.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("ListEntities row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &entity.Metadata); err != nil {
+				return nil, 0, fmt.Errorf("ListEntities row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		entities = append(entities, entity)
 	}
@@ -270,17 +290,31 @@ func (s *PostgresStore) ListEntities(params ListParams) ([]EntityDefinition, int
 	return entities, totalCount, nil
 }
 
-func (s *PostgresStore) UpdateEntity(id, name, description string) (EntityDefinition, error) {
+func (s *PostgresStore) UpdateEntity(id, name, description string, metadata map[string]interface{}) (EntityDefinition, error) {
 	now := time.Now().UTC()
-	query := `UPDATE entity_definitions SET name = $1, description = $2, updated_at = $3 WHERE id = $4
-              RETURNING id, name, description, created_at, updated_at`
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return EntityDefinition{}, fmt.Errorf("UpdateEntity failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
+
+	query := `UPDATE entity_definitions SET name = $1, description = $2, metadata = $3, updated_at = $4 WHERE id = $5
+              RETURNING id, name, description, metadata, created_at, updated_at`
 	var entity EntityDefinition
-	err := s.DB.QueryRow(query, name, description, now, id).Scan(&entity.ID, &entity.Name, &entity.Description, &entity.CreatedAt, &entity.UpdatedAt)
+	var returnedMetadataJSON sql.NullString
+	err = s.DB.QueryRow(query, name, description, metadataJSON, now, id).Scan(&entity.ID, &entity.Name, &entity.Description, &returnedMetadataJSON, &entity.CreatedAt, &entity.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return EntityDefinition{}, sql.ErrNoRows // Or a custom "not found" error
+			return EntityDefinition{}, sql.ErrNoRows
 		}
 		return EntityDefinition{}, fmt.Errorf("UpdateEntity failed: %w", err)
+	}
+	if returnedMetadataJSON.Valid && returnedMetadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(returnedMetadataJSON.String), &entity.Metadata); err != nil {
+			return EntityDefinition{}, fmt.Errorf("UpdateEntity failed to unmarshal metadata: %w", err)
+		}
 	}
 	return entity, nil
 }
@@ -303,18 +337,27 @@ func (s *PostgresStore) DeleteEntity(id string) error {
 
 // --- EntityRelationshipDefinition Methods ---
 
-func (s *PostgresStore) CreateEntityRelationship(def EntityRelationshipDefinition) (EntityRelationshipDefinition, error) {
+func (s *PostgresStore) CreateEntityRelationship(def EntityRelationshipDefinition, metadata map[string]interface{}) (EntityRelationshipDefinition, error) {
 	now := time.Now().UTC()
 	if def.ID == "" {
 		def.ID = uuid.NewString()
 	}
 	def.CreatedAt = now
 	def.UpdatedAt = now
+	def.Metadata = metadata // Assign metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return EntityRelationshipDefinition{}, fmt.Errorf("CreateEntityRelationship failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `INSERT INTO entity_relationship_definitions 
-              (id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), def.CreatedAt, def.UpdatedAt)
+              (id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, metadata, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	_, err = s.DB.Exec(query, def.ID, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), metadataJSON, def.CreatedAt, def.UpdatedAt)
 	if err != nil {
 		return EntityRelationshipDefinition{}, fmt.Errorf("CreateEntityRelationship failed: %w", err)
 	}
@@ -323,22 +366,29 @@ func (s *PostgresStore) CreateEntityRelationship(def EntityRelationshipDefinitio
 
 func (s *PostgresStore) GetEntityRelationship(id string) (EntityRelationshipDefinition, error) {
 	var def EntityRelationshipDefinition
-	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+	var metadataJSON sql.NullString
+	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, metadata, created_at, updated_at 
               FROM entity_relationship_definitions WHERE id = $1`
 	err := s.DB.QueryRow(query, id).Scan(
-		&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt)
+		&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, 
+		&def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &metadataJSON, &def.CreatedAt, &def.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EntityRelationshipDefinition{}, sql.ErrNoRows
 		}
 		return EntityRelationshipDefinition{}, fmt.Errorf("GetEntityRelationship failed: %w", err)
 	}
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+			return EntityRelationshipDefinition{}, fmt.Errorf("GetEntityRelationship failed to unmarshal metadata: %w", err)
+		}
+	}
 	return def, nil
 }
 
 func (s *PostgresStore) GetEntityRelationshipsBySourceEntity(sourceEntityID string) ([]EntityRelationshipDefinition, error) {
 	var defs []EntityRelationshipDefinition
-	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+	query := `SELECT id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, metadata, created_at, updated_at 
               FROM entity_relationship_definitions WHERE source_entity_id = $1 ORDER BY name`
 	rows, err := s.DB.Query(query, sourceEntityID)
 	if err != nil {
@@ -348,10 +398,17 @@ func (s *PostgresStore) GetEntityRelationshipsBySourceEntity(sourceEntityID stri
 
 	for rows.Next() {
 		var def EntityRelationshipDefinition
+		var metadataJSON sql.NullString
 		if err := rows.Scan(
-			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, &def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
+			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID, 
+			&def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &metadataJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("GetEntityRelationshipsBySourceEntity row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+				return nil, fmt.Errorf("GetEntityRelationshipsBySourceEntity row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		defs = append(defs, def)
 	}
@@ -367,7 +424,7 @@ func (s *PostgresStore) ListEntityRelationships(params ListParams) ([]EntityRela
 
 	baseCountQuery := "SELECT COUNT(*) FROM entity_relationship_definitions"
 	baseSelectQuery := `SELECT id, name, description, source_entity_id, source_attribute_id, 
-						target_entity_id, target_attribute_id, relationship_type, created_at, updated_at 
+						target_entity_id, target_attribute_id, relationship_type, metadata, created_at, updated_at 
 						FROM entity_relationship_definitions`
 
 	var whereClauses []string
@@ -381,8 +438,6 @@ func (s *PostgresStore) ListEntityRelationships(params ListParams) ([]EntityRela
 		countArgs = append(countArgs, sourceEntityID)
 		argCounter++
 	}
-
-	// TODO: Add other filters here as needed, incrementing argCounter
 
 	if len(whereClauses) > 0 {
 		whereStr := " WHERE " + strings.Join(whereClauses, " AND ")
@@ -410,11 +465,17 @@ func (s *PostgresStore) ListEntityRelationships(params ListParams) ([]EntityRela
 
 	for rows.Next() {
 		var def EntityRelationshipDefinition
+		var metadataJSON sql.NullString
 		if err := rows.Scan(
 			&def.ID, &def.Name, &def.Description, &def.SourceEntityID, &def.SourceAttributeID,
-			&def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &def.CreatedAt, &def.UpdatedAt,
+			&def.TargetEntityID, &def.TargetAttributeID, &def.RelationshipType, &metadataJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListEntityRelationships row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+				return nil, 0, fmt.Errorf("ListEntityRelationships row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		defs = append(defs, def)
 	}
@@ -425,23 +486,39 @@ func (s *PostgresStore) ListEntityRelationships(params ListParams) ([]EntityRela
 }
 
 
-func (s *PostgresStore) UpdateEntityRelationship(id string, def EntityRelationshipDefinition) (EntityRelationshipDefinition, error) {
+func (s *PostgresStore) UpdateEntityRelationship(id string, def EntityRelationshipDefinition, metadata map[string]interface{}) (EntityRelationshipDefinition, error) {
 	now := time.Now().UTC()
 	def.UpdatedAt = now
-	def.ID = id // Ensure ID is the one from path param
+	def.ID = id 
+	def.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return EntityRelationshipDefinition{}, fmt.Errorf("UpdateEntityRelationship failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `UPDATE entity_relationship_definitions 
-              SET name = $1, description = $2, source_entity_id = $3, source_attribute_id = $4, target_entity_id = $5, target_attribute_id = $6, relationship_type = $7, updated_at = $8 
-              WHERE id = $9
-              RETURNING id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, created_at, updated_at`
+              SET name = $1, description = $2, source_entity_id = $3, source_attribute_id = $4, target_entity_id = $5, target_attribute_id = $6, relationship_type = $7, metadata = $8, updated_at = $9 
+              WHERE id = $10
+              RETURNING id, name, description, source_entity_id, source_attribute_id, target_entity_id, target_attribute_id, relationship_type, metadata, created_at, updated_at`
 	var updatedDef EntityRelationshipDefinition
-	err := s.DB.QueryRow(query, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), def.UpdatedAt, def.ID).Scan(
-		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.SourceEntityID, &updatedDef.SourceAttributeID, &updatedDef.TargetEntityID, &updatedDef.TargetAttributeID, &updatedDef.RelationshipType, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	var returnedMetadataJSON sql.NullString
+	err = s.DB.QueryRow(query, def.Name, def.Description, def.SourceEntityID, def.SourceAttributeID, def.TargetEntityID, def.TargetAttributeID, string(def.RelationshipType), metadataJSON, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.SourceEntityID, &updatedDef.SourceAttributeID, 
+		&updatedDef.TargetEntityID, &updatedDef.TargetAttributeID, &updatedDef.RelationshipType, &returnedMetadataJSON, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EntityRelationshipDefinition{}, sql.ErrNoRows
 		}
 		return EntityRelationshipDefinition{}, fmt.Errorf("UpdateEntityRelationship failed: %w", err)
+	}
+	if returnedMetadataJSON.Valid && returnedMetadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(returnedMetadataJSON.String), &updatedDef.Metadata); err != nil {
+			return EntityRelationshipDefinition{}, fmt.Errorf("UpdateEntityRelationship failed to unmarshal metadata: %w", err)
+		}
 	}
 	return updatedDef, nil
 }
@@ -465,18 +542,27 @@ func (s *PostgresStore) DeleteEntityRelationship(id string) error {
 
 // --- ScheduleDefinition Methods ---
 
-func (s *PostgresStore) CreateScheduleDefinition(def ScheduleDefinition) (ScheduleDefinition, error) {
+func (s *PostgresStore) CreateScheduleDefinition(def ScheduleDefinition, metadata map[string]interface{}) (ScheduleDefinition, error) {
 	now := time.Now().UTC()
 	if def.ID == "" {
 		def.ID = uuid.NewString()
 	}
 	def.CreatedAt = now
 	def.UpdatedAt = now
+	def.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return ScheduleDefinition{}, fmt.Errorf("CreateScheduleDefinition failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `INSERT INTO schedule_definitions 
-              (id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, def.CreatedAt, def.UpdatedAt)
+              (id, name, description, cron_expression, task_type, task_parameters, is_enabled, metadata, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err = s.DB.Exec(query, def.ID, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, metadataJSON, def.CreatedAt, def.UpdatedAt)
 	if err != nil {
 		return ScheduleDefinition{}, fmt.Errorf("CreateScheduleDefinition failed: %w", err)
 	}
@@ -485,15 +571,22 @@ func (s *PostgresStore) CreateScheduleDefinition(def ScheduleDefinition) (Schedu
 
 func (s *PostgresStore) GetScheduleDefinition(id string) (ScheduleDefinition, error) {
 	var def ScheduleDefinition
-	query := `SELECT id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at 
+	var metadataJSON sql.NullString
+	query := `SELECT id, name, description, cron_expression, task_type, task_parameters, is_enabled, metadata, created_at, updated_at 
               FROM schedule_definitions WHERE id = $1`
 	err := s.DB.QueryRow(query, id).Scan(
-		&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, &def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt)
+		&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, 
+		&def.TaskParameters, &def.IsEnabled, &metadataJSON, &def.CreatedAt, &def.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ScheduleDefinition{}, sql.ErrNoRows
 		}
 		return ScheduleDefinition{}, fmt.Errorf("GetScheduleDefinition failed: %w", err)
+	}
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+			return ScheduleDefinition{}, fmt.Errorf("GetScheduleDefinition failed to unmarshal metadata: %w", err)
+		}
 	}
 	return def, nil
 }
@@ -504,16 +597,12 @@ func (s *PostgresStore) ListScheduleDefinitions(params ListParams) ([]ScheduleDe
 
 	baseCountQuery := "SELECT COUNT(*) FROM schedule_definitions"
 	baseSelectQuery := `SELECT id, name, description, cron_expression, task_type, 
-						task_parameters, is_enabled, created_at, updated_at 
+						task_parameters, is_enabled, metadata, created_at, updated_at 
 						FROM schedule_definitions`
 	
 	var args []interface{}
-	// var countArgs []interface{} // If filters were added
 
-	// TODO: Implement filtering based on params.Filters if any
-	// Add WHERE clauses to baseCountQuery and baseSelectQuery, and populate countArgs/args
-
-	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
+	err := s.DB.QueryRow(baseCountQuery).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListScheduleDefinitions count query failed: %w", err)
 	}
@@ -533,11 +622,17 @@ func (s *PostgresStore) ListScheduleDefinitions(params ListParams) ([]ScheduleDe
 
 	for rows.Next() {
 		var def ScheduleDefinition
+		var metadataJSON sql.NullString
 		if err := rows.Scan(
 			&def.ID, &def.Name, &def.Description, &def.CronExpression, &def.TaskType, 
-			&def.TaskParameters, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+			&def.TaskParameters, &def.IsEnabled, &metadataJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListScheduleDefinitions row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+				return nil, 0, fmt.Errorf("ListScheduleDefinitions row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		defs = append(defs, def)
 	}
@@ -547,23 +642,39 @@ func (s *PostgresStore) ListScheduleDefinitions(params ListParams) ([]ScheduleDe
 	return defs, totalCount, nil
 }
 
-func (s *PostgresStore) UpdateScheduleDefinition(id string, def ScheduleDefinition) (ScheduleDefinition, error) {
+func (s *PostgresStore) UpdateScheduleDefinition(id string, def ScheduleDefinition, metadata map[string]interface{}) (ScheduleDefinition, error) {
 	now := time.Now().UTC()
 	def.UpdatedAt = now
-	def.ID = id // Ensure ID is the one from path param, not from payload if they differ
+	def.ID = id 
+	def.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return ScheduleDefinition{}, fmt.Errorf("UpdateScheduleDefinition failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `UPDATE schedule_definitions 
-              SET name = $1, description = $2, cron_expression = $3, task_type = $4, task_parameters = $5, is_enabled = $6, updated_at = $7 
-              WHERE id = $8
-              RETURNING id, name, description, cron_expression, task_type, task_parameters, is_enabled, created_at, updated_at`
+              SET name = $1, description = $2, cron_expression = $3, task_type = $4, task_parameters = $5, is_enabled = $6, metadata = $7, updated_at = $8 
+              WHERE id = $9
+              RETURNING id, name, description, cron_expression, task_type, task_parameters, is_enabled, metadata, created_at, updated_at`
 	var updatedDef ScheduleDefinition
-	err := s.DB.QueryRow(query, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, def.UpdatedAt, def.ID).Scan(
-		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.CronExpression, &updatedDef.TaskType, &updatedDef.TaskParameters, &updatedDef.IsEnabled, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	var returnedMetadataJSON sql.NullString
+	err = s.DB.QueryRow(query, def.Name, def.Description, def.CronExpression, def.TaskType, def.TaskParameters, def.IsEnabled, metadataJSON, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.CronExpression, &updatedDef.TaskType, 
+		&updatedDef.TaskParameters, &updatedDef.IsEnabled, &returnedMetadataJSON, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ScheduleDefinition{}, sql.ErrNoRows
 		}
 		return ScheduleDefinition{}, fmt.Errorf("UpdateScheduleDefinition failed: %w", err)
+	}
+	if returnedMetadataJSON.Valid && returnedMetadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(returnedMetadataJSON.String), &updatedDef.Metadata); err != nil {
+			return ScheduleDefinition{}, fmt.Errorf("UpdateScheduleDefinition failed to unmarshal metadata: %w", err)
+		}
 	}
 	return updatedDef, nil
 }
@@ -586,24 +697,37 @@ func (s *PostgresStore) DeleteScheduleDefinition(id string) error {
 
 // --- AttributeDefinition Methods ---
 
-func (s *PostgresStore) CreateAttribute(entityID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
+func (s *PostgresStore) CreateAttribute(entityID, name string, dataTypeName BaseDataTypeName, dataTypeDetails map[string]interface{}, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
 	now := time.Now().UTC()
 	attr := AttributeDefinition{
-		ID:           uuid.NewString(),
-		EntityID:     entityID,
-		Name:         name,
-		DataType:     dataType,
-		Description:  description,
-		IsFilterable: isFilterable,
-		IsPii:        isPii,
-		IsIndexed:    isIndexed,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:              uuid.NewString(),
+		EntityID:        entityID,
+		Name:            name,
+		DataTypeName:    dataTypeName,
+		DataTypeDetails: dataTypeDetails,
+		Description:     description,
+		IsFilterable:    isFilterable,
+		IsPii:           isPii,
+		IsIndexed:       isIndexed,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
+
+	var detailsJSON []byte
+	var err error
+	if dataTypeDetails != nil {
+		detailsJSON, err = json.Marshal(dataTypeDetails)
+		if err != nil {
+			return AttributeDefinition{}, fmt.Errorf("CreateAttribute failed to marshal DataTypeDetails: %w", err)
+		}
+	} else {
+		detailsJSON = []byte("null") // Or "{}" if preferred for empty details
+	}
+
 	query := `INSERT INTO attribute_definitions 
-              (id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := s.DB.Exec(query, attr.ID, attr.EntityID, attr.Name, attr.DataType, attr.Description, attr.IsFilterable, attr.IsPii, attr.IsIndexed, attr.CreatedAt, attr.UpdatedAt)
+              (id, entity_id, name, data_type_name, data_type_details, description, is_filterable, is_pii, is_indexed, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	_, err = s.DB.Exec(query, attr.ID, attr.EntityID, attr.Name, attr.DataTypeName, detailsJSON, attr.Description, attr.IsFilterable, attr.IsPii, attr.IsIndexed, attr.CreatedAt, attr.UpdatedAt)
 	if err != nil {
 		return AttributeDefinition{}, fmt.Errorf("CreateAttribute failed: %w", err)
 	}
@@ -612,15 +736,29 @@ func (s *PostgresStore) CreateAttribute(entityID, name, dataType, description st
 
 func (s *PostgresStore) GetAttribute(entityID, attributeID string) (AttributeDefinition, error) {
 	var attr AttributeDefinition
-	query := `SELECT id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at 
+	var detailsJSON sql.NullString // Use sql.NullString to handle potential NULL from DB
+
+	query := `SELECT id, entity_id, name, data_type_name, data_type_details, description, is_filterable, is_pii, is_indexed, created_at, updated_at 
               FROM attribute_definitions WHERE entity_id = $1 AND id = $2`
-	err := s.DB.QueryRow(query, entityID, attributeID).Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
+	err := s.DB.QueryRow(query, entityID, attributeID).Scan(
+		&attr.ID, &attr.EntityID, &attr.Name, &attr.DataTypeName, &detailsJSON, &attr.Description,
+		&attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AttributeDefinition{}, sql.ErrNoRows
 		}
 		return AttributeDefinition{}, fmt.Errorf("GetAttribute failed: %w", err)
 	}
+
+	if detailsJSON.Valid && detailsJSON.String != "" {
+		err = json.Unmarshal([]byte(detailsJSON.String), &attr.DataTypeDetails)
+		if err != nil {
+			return AttributeDefinition{}, fmt.Errorf("GetAttribute failed to unmarshal DataTypeDetails: %w", err)
+		}
+	} else {
+		attr.DataTypeDetails = nil // Ensure it's nil if DB value was NULL or empty
+	}
+
 	return attr, nil
 }
 
@@ -628,25 +766,14 @@ func (s *PostgresStore) ListAttributes(entityID string, params ListParams) ([]At
 	var attrs []AttributeDefinition
 	var totalCount int64
 
-	// Base query for counting
 	countQueryStr := "SELECT COUNT(*) FROM attribute_definitions WHERE entity_id = $1"
-	// Base query for selecting data
-	selectQueryStr := `SELECT id, entity_id, name, data_type, description, is_filterable, 
+	selectQueryStr := `SELECT id, entity_id, name, data_type_name, data_type_details, description, is_filterable, 
 						 is_pii, is_indexed, created_at, updated_at 
 						 FROM attribute_definitions WHERE entity_id = $1`
 
 	var args []interface{}
 	var countArgs []interface{}{entityID}
-	argCounter := 2 // Start after entity_id
-
-	// TODO: Implement filtering based on params.Filters if any
-	// Example: if nameFilter, ok := params.Filters["name"].(string); ok && nameFilter != "" {
-	//    countQueryStr += fmt.Sprintf(" AND name ILIKE $%d", argCounter)
-	//    selectQueryStr += fmt.Sprintf(" AND name ILIKE $%d", argCounter)
-	//    countArgs = append(countArgs, "%"+nameFilter+"%")
-	//    args = append(args, "%"+nameFilter+"%")
-	//    argCounter++
-	// }
+	argCounter := 2 
 	
 	err := s.DB.QueryRow(countQueryStr, countArgs...).Scan(&totalCount)
 	if err != nil {
@@ -657,10 +784,9 @@ func (s *PostgresStore) ListAttributes(entityID string, params ListParams) ([]At
 		return []AttributeDefinition{}, 0, nil
 	}
 	
-	args = append(args, entityID) // First arg for select is entity_id
+	args = append(args, entityID) 
 	selectQueryStr += fmt.Sprintf(" ORDER BY name LIMIT $%d OFFSET $%d", argCounter, argCounter+1)
 	args = append(args, params.GetLimit(), params.GetOffset())
-
 
 	rows, err := s.DB.Query(selectQueryStr, args...)
 	if err != nil {
@@ -670,9 +796,18 @@ func (s *PostgresStore) ListAttributes(entityID string, params ListParams) ([]At
 
 	for rows.Next() {
 		var attr AttributeDefinition
-		if err := rows.Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, 
+		var detailsJSON sql.NullString
+		if err := rows.Scan(&attr.ID, &attr.EntityID, &attr.Name, &attr.DataTypeName, &detailsJSON, &attr.Description, 
 			&attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("ListAttributes row scan for entityID %s failed: %w", entityID, err)
+		}
+		if detailsJSON.Valid && detailsJSON.String != "" {
+			err = json.Unmarshal([]byte(detailsJSON.String), &attr.DataTypeDetails)
+			if err != nil {
+				return nil, 0, fmt.Errorf("ListAttributes failed to unmarshal DataTypeDetails for attribute %s: %w", attr.ID, err)
+			}
+		} else {
+			attr.DataTypeDetails = nil
 		}
 		attrs = append(attrs, attr)
 	}
@@ -682,20 +817,44 @@ func (s *PostgresStore) ListAttributes(entityID string, params ListParams) ([]At
 	return attrs, totalCount, nil
 }
 
-func (s *PostgresStore) UpdateAttribute(entityID, attributeID, name, dataType, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
+func (s *PostgresStore) UpdateAttribute(entityID, attributeID, name string, dataTypeName BaseDataTypeName, dataTypeDetails map[string]interface{}, description string, isFilterable bool, isPii bool, isIndexed bool) (AttributeDefinition, error) {
 	now := time.Now().UTC()
+
+	var detailsJSON []byte
+	var err error
+	if dataTypeDetails != nil {
+		detailsJSON, err = json.Marshal(dataTypeDetails)
+		if err != nil {
+			return AttributeDefinition{}, fmt.Errorf("UpdateAttribute failed to marshal DataTypeDetails: %w", err)
+		}
+	} else {
+		detailsJSON = []byte("null") // Or "{}"
+	}
+
 	query := `UPDATE attribute_definitions 
-              SET name = $1, data_type = $2, description = $3, is_filterable = $4, is_pii = $5, is_indexed = $6, updated_at = $7 
-              WHERE entity_id = $8 AND id = $9
-              RETURNING id, entity_id, name, data_type, description, is_filterable, is_pii, is_indexed, created_at, updated_at`
+              SET name = $1, data_type_name = $2, data_type_details = $3, description = $4, is_filterable = $5, is_pii = $6, is_indexed = $7, updated_at = $8 
+              WHERE entity_id = $9 AND id = $10
+              RETURNING id, entity_id, name, data_type_name, data_type_details, description, is_filterable, is_pii, is_indexed, created_at, updated_at`
+	
 	var attr AttributeDefinition
-	err := s.DB.QueryRow(query, name, dataType, description, isFilterable, isPii, isIndexed, now, entityID, attributeID).Scan(
-		&attr.ID, &attr.EntityID, &attr.Name, &attr.DataType, &attr.Description, &attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
+	var returnedDetailsJSON sql.NullString
+	err = s.DB.QueryRow(query, name, dataTypeName, detailsJSON, description, isFilterable, isPii, isIndexed, now, entityID, attributeID).Scan(
+		&attr.ID, &attr.EntityID, &attr.Name, &attr.DataTypeName, &returnedDetailsJSON, &attr.Description, 
+		&attr.IsFilterable, &attr.IsPii, &attr.IsIndexed, &attr.CreatedAt, &attr.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AttributeDefinition{}, sql.ErrNoRows
 		}
 		return AttributeDefinition{}, fmt.Errorf("UpdateAttribute failed: %w", err)
+	}
+
+	if returnedDetailsJSON.Valid && returnedDetailsJSON.String != "" {
+		err = json.Unmarshal([]byte(returnedDetailsJSON.String), &attr.DataTypeDetails)
+		if err != nil {
+			return AttributeDefinition{}, fmt.Errorf("UpdateAttribute failed to unmarshal returned DataTypeDetails: %w", err)
+		}
+	} else {
+		attr.DataTypeDetails = nil
 	}
 	return attr, nil
 }
@@ -1078,18 +1237,27 @@ func (s *PostgresStore) DeleteGroupDefinition(id string) error {
 
 // --- WorkflowDefinition Methods ---
 
-func (s *PostgresStore) CreateWorkflowDefinition(def WorkflowDefinition) (WorkflowDefinition, error) {
+func (s *PostgresStore) CreateWorkflowDefinition(def WorkflowDefinition, metadata map[string]interface{}) (WorkflowDefinition, error) {
 	now := time.Now().UTC()
 	if def.ID == "" {
 		def.ID = uuid.NewString()
 	}
 	def.CreatedAt = now
 	def.UpdatedAt = now
+	def.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return WorkflowDefinition{}, fmt.Errorf("CreateWorkflowDefinition failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `INSERT INTO workflow_definitions 
-              (id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err := s.DB.Exec(query, def.ID, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, def.CreatedAt, def.UpdatedAt)
+              (id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, metadata, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err = s.DB.Exec(query, def.ID, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, metadataJSON, def.CreatedAt, def.UpdatedAt)
 	if err != nil {
 		return WorkflowDefinition{}, fmt.Errorf("CreateWorkflowDefinition failed: %w", err)
 	}
@@ -1098,15 +1266,22 @@ func (s *PostgresStore) CreateWorkflowDefinition(def WorkflowDefinition) (Workfl
 
 func (s *PostgresStore) GetWorkflowDefinition(id string) (WorkflowDefinition, error) {
 	var def WorkflowDefinition
-	query := `SELECT id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at 
+	var metadataJSON sql.NullString
+	query := `SELECT id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, metadata, created_at, updated_at 
               FROM workflow_definitions WHERE id = $1`
 	err := s.DB.QueryRow(query, id).Scan(
-		&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, &def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt)
+		&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, 
+		&def.ActionSequenceJSON, &def.IsEnabled, &metadataJSON, &def.CreatedAt, &def.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return WorkflowDefinition{}, sql.ErrNoRows
 		}
 		return WorkflowDefinition{}, fmt.Errorf("GetWorkflowDefinition failed: %w", err)
+	}
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+			return WorkflowDefinition{}, fmt.Errorf("GetWorkflowDefinition failed to unmarshal metadata: %w", err)
+		}
 	}
 	return def, nil
 }
@@ -1117,15 +1292,12 @@ func (s *PostgresStore) ListWorkflowDefinitions(params ListParams) ([]WorkflowDe
 
 	baseCountQuery := "SELECT COUNT(*) FROM workflow_definitions"
 	baseSelectQuery := `SELECT id, name, description, trigger_type, trigger_config, 
-						action_sequence_json, is_enabled, created_at, updated_at 
+						action_sequence_json, is_enabled, metadata, created_at, updated_at 
 						FROM workflow_definitions`
 	
 	var args []interface{}
-	// var countArgs []interface{} // If filters were added
 
-	// TODO: Implement filtering based on params.Filters if any
-
-	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
+	err := s.DB.QueryRow(baseCountQuery).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListWorkflowDefinitions count query failed: %w", err)
 	}
@@ -1145,11 +1317,17 @@ func (s *PostgresStore) ListWorkflowDefinitions(params ListParams) ([]WorkflowDe
 
 	for rows.Next() {
 		var def WorkflowDefinition
+		var metadataJSON sql.NullString
 		if err := rows.Scan(
 			&def.ID, &def.Name, &def.Description, &def.TriggerType, &def.TriggerConfig, 
-			&def.ActionSequenceJSON, &def.IsEnabled, &def.CreatedAt, &def.UpdatedAt,
+			&def.ActionSequenceJSON, &def.IsEnabled, &metadataJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListWorkflowDefinitions row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &def.Metadata); err != nil {
+				return nil, 0, fmt.Errorf("ListWorkflowDefinitions row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		defs = append(defs, def)
 	}
@@ -1159,23 +1337,39 @@ func (s *PostgresStore) ListWorkflowDefinitions(params ListParams) ([]WorkflowDe
 	return defs, totalCount, nil
 }
 
-func (s *PostgresStore) UpdateWorkflowDefinition(id string, def WorkflowDefinition) (WorkflowDefinition, error) {
+func (s *PostgresStore) UpdateWorkflowDefinition(id string, def WorkflowDefinition, metadata map[string]interface{}) (WorkflowDefinition, error) {
 	now := time.Now().UTC()
 	def.UpdatedAt = now
 	def.ID = id
+	def.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return WorkflowDefinition{}, fmt.Errorf("UpdateWorkflowDefinition failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `UPDATE workflow_definitions 
-              SET name = $1, description = $2, trigger_type = $3, trigger_config = $4, action_sequence_json = $5, is_enabled = $6, updated_at = $7 
-              WHERE id = $8
-              RETURNING id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, created_at, updated_at`
+              SET name = $1, description = $2, trigger_type = $3, trigger_config = $4, action_sequence_json = $5, is_enabled = $6, metadata = $7, updated_at = $8 
+              WHERE id = $9
+              RETURNING id, name, description, trigger_type, trigger_config, action_sequence_json, is_enabled, metadata, created_at, updated_at`
 	var updatedDef WorkflowDefinition
-	err := s.DB.QueryRow(query, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, def.UpdatedAt, def.ID).Scan(
-		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.TriggerType, &updatedDef.TriggerConfig, &updatedDef.ActionSequenceJSON, &updatedDef.IsEnabled, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
+	var returnedMetadataJSON sql.NullString
+	err = s.DB.QueryRow(query, def.Name, def.Description, def.TriggerType, def.TriggerConfig, def.ActionSequenceJSON, def.IsEnabled, metadataJSON, def.UpdatedAt, def.ID).Scan(
+		&updatedDef.ID, &updatedDef.Name, &updatedDef.Description, &updatedDef.TriggerType, &updatedDef.TriggerConfig, 
+		&updatedDef.ActionSequenceJSON, &updatedDef.IsEnabled, &returnedMetadataJSON, &updatedDef.CreatedAt, &updatedDef.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return WorkflowDefinition{}, sql.ErrNoRows
 		}
 		return WorkflowDefinition{}, fmt.Errorf("UpdateWorkflowDefinition failed: %w", err)
+	}
+	if returnedMetadataJSON.Valid && returnedMetadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(returnedMetadataJSON.String), &updatedDef.Metadata); err != nil {
+			return WorkflowDefinition{}, fmt.Errorf("UpdateWorkflowDefinition failed to unmarshal metadata: %w", err)
+		}
 	}
 	return updatedDef, nil
 }
@@ -1198,17 +1392,26 @@ func (s *PostgresStore) DeleteWorkflowDefinition(id string) error {
 
 // --- ActionTemplate Methods ---
 
-func (s *PostgresStore) CreateActionTemplate(tmpl ActionTemplate) (ActionTemplate, error) {
+func (s *PostgresStore) CreateActionTemplate(tmpl ActionTemplate, metadata map[string]interface{}) (ActionTemplate, error) {
 	now := time.Now().UTC()
 	if tmpl.ID == "" {
 		tmpl.ID = uuid.NewString()
 	}
 	tmpl.CreatedAt = now
 	tmpl.UpdatedAt = now
+	tmpl.Metadata = metadata
 
-	query := `INSERT INTO action_templates (id, name, description, action_type, template_content, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)`
-	_, err := s.DB.Exec(query, tmpl.ID, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, tmpl.CreatedAt, tmpl.UpdatedAt)
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return ActionTemplate{}, fmt.Errorf("CreateActionTemplate failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
+
+	query := `INSERT INTO action_templates (id, name, description, action_type, template_content, metadata, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	_, err = s.DB.Exec(query, tmpl.ID, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, metadataJSON, tmpl.CreatedAt, tmpl.UpdatedAt)
 	if err != nil {
 		return ActionTemplate{}, fmt.Errorf("CreateActionTemplate failed: %w", err)
 	}
@@ -1217,14 +1420,20 @@ func (s *PostgresStore) CreateActionTemplate(tmpl ActionTemplate) (ActionTemplat
 
 func (s *PostgresStore) GetActionTemplate(id string) (ActionTemplate, error) {
 	var tmpl ActionTemplate
-	query := `SELECT id, name, description, action_type, template_content, created_at, updated_at FROM action_templates WHERE id = $1`
+	var metadataJSON sql.NullString
+	query := `SELECT id, name, description, action_type, template_content, metadata, created_at, updated_at FROM action_templates WHERE id = $1`
 	err := s.DB.QueryRow(query, id).Scan(
-		&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, &tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt)
+		&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, &tmpl.TemplateContent, &metadataJSON, &tmpl.CreatedAt, &tmpl.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ActionTemplate{}, sql.ErrNoRows
 		}
 		return ActionTemplate{}, fmt.Errorf("GetActionTemplate failed: %w", err)
+	}
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &tmpl.Metadata); err != nil {
+			return ActionTemplate{}, fmt.Errorf("GetActionTemplate failed to unmarshal metadata: %w", err)
+		}
 	}
 	return tmpl, nil
 }
@@ -1235,14 +1444,11 @@ func (s *PostgresStore) ListActionTemplates(params ListParams) ([]ActionTemplate
 
 	baseCountQuery := "SELECT COUNT(*) FROM action_templates"
 	baseSelectQuery := `SELECT id, name, description, action_type, template_content, 
-						created_at, updated_at FROM action_templates`
+						metadata, created_at, updated_at FROM action_templates`
 	
 	var args []interface{}
-	// var countArgs []interface{} // If filters were added
 
-	// TODO: Implement filtering based on params.Filters if any
-	
-	err := s.DB.QueryRow(baseCountQuery /*, countArgs... */).Scan(&totalCount)
+	err := s.DB.QueryRow(baseCountQuery).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListActionTemplates count query failed: %w", err)
 	}
@@ -1262,11 +1468,17 @@ func (s *PostgresStore) ListActionTemplates(params ListParams) ([]ActionTemplate
 
 	for rows.Next() {
 		var tmpl ActionTemplate
+		var metadataJSON sql.NullString
 		if err := rows.Scan(
 			&tmpl.ID, &tmpl.Name, &tmpl.Description, &tmpl.ActionType, 
-			&tmpl.TemplateContent, &tmpl.CreatedAt, &tmpl.UpdatedAt,
+			&tmpl.TemplateContent, &metadataJSON, &tmpl.CreatedAt, &tmpl.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListActionTemplates row scan failed: %w", err)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &tmpl.Metadata); err != nil {
+				return nil, 0, fmt.Errorf("ListActionTemplates row scan failed to unmarshal metadata: %w", err)
+			}
 		}
 		tmpls = append(tmpls, tmpl)
 	}
@@ -1276,23 +1488,39 @@ func (s *PostgresStore) ListActionTemplates(params ListParams) ([]ActionTemplate
 	return tmpls, totalCount, nil
 }
 
-func (s *PostgresStore) UpdateActionTemplate(id string, tmpl ActionTemplate) (ActionTemplate, error) {
+func (s *PostgresStore) UpdateActionTemplate(id string, tmpl ActionTemplate, metadata map[string]interface{}) (ActionTemplate, error) {
 	now := time.Now().UTC()
 	tmpl.UpdatedAt = now
 	tmpl.ID = id
+	tmpl.Metadata = metadata
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return ActionTemplate{}, fmt.Errorf("UpdateActionTemplate failed to marshal metadata: %w", err)
+	}
+	if string(metadataJSON) == "null" {
+		metadataJSON = nil
+	}
 
 	query := `UPDATE action_templates 
-              SET name = $1, description = $2, action_type = $3, template_content = $4, updated_at = $5 
-              WHERE id = $6
-              RETURNING id, name, description, action_type, template_content, created_at, updated_at`
+              SET name = $1, description = $2, action_type = $3, template_content = $4, metadata = $5, updated_at = $6 
+              WHERE id = $7
+              RETURNING id, name, description, action_type, template_content, metadata, created_at, updated_at`
 	var updatedTmpl ActionTemplate
-	err := s.DB.QueryRow(query, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, tmpl.UpdatedAt, tmpl.ID).Scan(
-		&updatedTmpl.ID, &updatedTmpl.Name, &updatedTmpl.Description, &updatedTmpl.ActionType, &updatedTmpl.TemplateContent, &updatedTmpl.CreatedAt, &updatedTmpl.UpdatedAt)
+	var returnedMetadataJSON sql.NullString
+	err = s.DB.QueryRow(query, tmpl.Name, tmpl.Description, tmpl.ActionType, tmpl.TemplateContent, metadataJSON, tmpl.UpdatedAt, tmpl.ID).Scan(
+		&updatedTmpl.ID, &updatedTmpl.Name, &updatedTmpl.Description, &updatedTmpl.ActionType, 
+		&updatedTmpl.TemplateContent, &returnedMetadataJSON, &updatedTmpl.CreatedAt, &updatedTmpl.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ActionTemplate{}, sql.ErrNoRows
 		}
 		return ActionTemplate{}, fmt.Errorf("UpdateActionTemplate failed: %w", err)
+	}
+	if returnedMetadataJSON.Valid && returnedMetadataJSON.String != "" {
+		if err := json.Unmarshal([]byte(returnedMetadataJSON.String), &updatedTmpl.Metadata); err != nil {
+			return ActionTemplate{}, fmt.Errorf("UpdateActionTemplate failed to unmarshal metadata: %w", err)
+		}
 	}
 	return updatedTmpl, nil
 }
@@ -1323,7 +1551,7 @@ func (s *PostgresStore) DeleteActionTemplate(id string) error {
 
 // --- Bulk EntityDefinition Methods ---
 
-// BulkCreateEntities attempts to create multiple entities.
+// BulkCreateEntities attempts to create multiple entities. The 'metadata' field for each entity is assumed to be nil or handled by CreateEntity.
 // It processes each entity individually and reports success or failure for each.
 func (s *PostgresStore) BulkCreateEntities(entities []EntityCreateData) ([]BulkOperationResultItem, error) {
 	results := make([]BulkOperationResultItem, 0, len(entities))
@@ -1352,16 +1580,12 @@ func (s *PostgresStore) BulkCreateEntities(entities []EntityCreateData) ([]BulkO
 // For partial updates, ensure that EntityUpdateData fields are pointers or use a similar mechanism
 // if empty strings are valid values and should not be skipped. Current EntityUpdateData uses omitempty,
 // so empty fields are fine for not updating.
+// The 'metadata' field is not explicitly handled here; UpdateEntity would need to accept it.
 func (s *PostgresStore) BulkUpdateEntities(entities []EntityUpdateData) ([]BulkOperationResultItem, error) {
 	results := make([]BulkOperationResultItem, 0, len(entities))
 
 	for _, item := range entities {
 		result := BulkOperationResultItem{ID: item.ID}
-
-		// Get current entity to ensure it exists and to have its full state if needed.
-		// The current UpdateEntity method in store.go doesn't require pre-fetching
-		// if we are okay with its behavior of updating specified fields.
-		// However, to ensure we only update existing, a GetEntity check is good.
 		existingEntity, err := s.GetEntity(item.ID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -1375,21 +1599,20 @@ func (s *PostgresStore) BulkUpdateEntities(entities []EntityUpdateData) ([]BulkO
 			continue
 		}
 
-		// Use existing values if new ones are not provided (respecting omitempty behavior)
 		name := existingEntity.Name
 		if item.Name != "" {
 			name = item.Name
 		}
 		description := existingEntity.Description
-		if item.Description != "" { // Assuming empty string for description means "do not update" if it was previously set.
+		if item.Description != "" {
 			description = item.Description
 		}
 		
-		// The existing UpdateEntity method updates both name and description.
-		// If item.Name or item.Description is empty, it will update the field to be empty.
-		// This might not be desired for partial updates where empty means "don't change".
-		// For true partial update with current UpdateEntity, we'd pass existing values if item fields are empty.
-		updatedEntity, err := s.UpdateEntity(item.ID, name, description)
+		// Assuming UpdateEntity is updated to handle metadata, otherwise this bulk op won't update metadata.
+		// For this example, we'll call the existing UpdateEntity which doesn't handle metadata.
+		// To properly update metadata, UpdateEntity signature & logic would need to change,
+		// or a different update approach taken here (e.g. dynamic SQL based on fields present in item).
+		updatedEntity, err := s.UpdateEntity(item.ID, name, description, existingEntity.Metadata) // Pass existing metadata
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()

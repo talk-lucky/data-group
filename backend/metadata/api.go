@@ -142,15 +142,16 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 // createEntityHandler handles requests to create a new entity.
 func (a *API) createEntityHandler(c *gin.Context) {
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Description string `json:"description"`
+		Name        string                 `json:"name" binding:"required"`
+		Description string                 `json:"description"`
+		Metadata    map[string]interface{} `json:"metadata"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
-	entity, err := a.store.CreateEntity(req.Name, req.Description)
+	entity, err := a.store.CreateEntity(req.Name, req.Description, req.Metadata)
 	if err != nil {
 		handleAPIError(c, http.StatusInternalServerError, "Failed to create entity: "+err.Error())
 		return
@@ -207,15 +208,16 @@ func (a *API) getEntityHandler(c *gin.Context) {
 func (a *API) updateEntityHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Description string `json:"description"`
+		Name        string                 `json:"name" binding:"required"`
+		Description string                 `json:"description"`
+		Metadata    map[string]interface{} `json:"metadata"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
-	entity, err := a.store.UpdateEntity(entityID, req.Name, req.Description)
+	entity, err := a.store.UpdateEntity(entityID, req.Name, req.Description, req.Metadata)
 	if err != nil {
 		handleStoreError(c, err, "Entity")
 		return
@@ -345,10 +347,10 @@ func (a *API) createEntityRelationshipHandler(c *gin.Context) {
 
 	// Basic validation for RelationshipType
 	switch req.RelationshipType {
-	case OneToOne, OneToMany, ManyToOne:
+	case OneToOne, OneToMany, ManyToOne, ManyToMany: // Added ManyToMany
 		// valid
 	default:
-		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE")
+		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, or MANY_TO_MANY")
 		return
 	}
 
@@ -356,7 +358,7 @@ func (a *API) createEntityRelationshipHandler(c *gin.Context) {
 	// This requires querying the store for those entities/attributes.
 	// For now, we rely on DB foreign key constraints.
 
-	er, err := a.store.CreateEntityRelationship(req)
+	er, err := a.store.CreateEntityRelationship(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Refactored handleStoreError now uses handleAPIError
 		handleStoreError(c, err, "EntityRelationship")
@@ -423,16 +425,16 @@ func (a *API) updateEntityRelationshipHandler(c *gin.Context) {
 
 	// Basic validation for RelationshipType
 	switch req.RelationshipType {
-	case OneToOne, OneToMany, ManyToOne:
+	case OneToOne, OneToMany, ManyToOne, ManyToMany: // Added ManyToMany
 		// valid
 	default:
-		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE")
+		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, or MANY_TO_MANY")
 		return
 	}
 
 	// TODO: Add validation for IDs if necessary
 
-	er, err := a.store.UpdateEntityRelationship(erID, req)
+	er, err := a.store.UpdateEntityRelationship(erID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Refactored handleStoreError now uses handleAPIError
 		handleStoreError(c, err, "EntityRelationship")
@@ -463,7 +465,7 @@ func (a *API) createScheduleDefinitionHandler(c *gin.Context) {
 	// ID, CreatedAt, UpdatedAt are set by the store
 	req.ID = ""
 
-	schedule, err := a.store.CreateScheduleDefinition(req)
+	schedule, err := a.store.CreateScheduleDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Using handleStoreError which now calls handleAPIError
 		handleStoreError(c, err, "ScheduleDefinition")
@@ -518,7 +520,7 @@ func (a *API) updateScheduleDefinitionHandler(c *gin.Context) {
 		return
 	}
 
-	schedule, err := a.store.UpdateScheduleDefinition(scheduleID, req)
+	schedule, err := a.store.UpdateScheduleDefinition(scheduleID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Schedule")
 		return
@@ -545,7 +547,7 @@ func (a *API) createWorkflowDefinitionHandler(c *gin.Context) {
 		return
 	}
 	req.ID = "" // Set by store
-	workflow, err := a.store.CreateWorkflowDefinition(req)
+	workflow, err := a.store.CreateWorkflowDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Workflow Definition")
 		return
@@ -598,7 +600,7 @@ func (a *API) updateWorkflowDefinitionHandler(c *gin.Context) {
 		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
-	workflow, err := a.store.UpdateWorkflowDefinition(workflowID, req)
+	workflow, err := a.store.UpdateWorkflowDefinition(workflowID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Workflow Definition")
 		return
@@ -625,7 +627,7 @@ func (a *API) createActionTemplateHandler(c *gin.Context) {
 		return
 	}
 	req.ID = "" // Set by store
-	template, err := a.store.CreateActionTemplate(req)
+	template, err := a.store.CreateActionTemplate(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Action Template")
 		return
@@ -678,7 +680,7 @@ func (a *API) updateActionTemplateHandler(c *gin.Context) {
 		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
-	template, err := a.store.UpdateActionTemplate(templateID, req)
+	template, err := a.store.UpdateActionTemplate(templateID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Action Template")
 		return
@@ -702,10 +704,12 @@ func (a *API) deleteActionTemplateHandler(c *gin.Context) {
 func (a *API) createAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	var req struct {
-		Name         string `json:"name" binding:"required"`
-		DataType     string `json:"data_type" binding:"required"`
-		Description  string `json:"description"`
-		IsFilterable bool   `json:"is_filterable"`
+		Name            string                 `json:"name" binding:"required"`
+		DataTypeName    BaseDataTypeName       `json:"data_type_name" binding:"required"`
+		DataTypeDetails map[string]interface{} `json:"data_type_details"`
+		Description     string                 `json:"description"`
+		Metadata        map[string]interface{} `json:"metadata"`
+		IsFilterable    bool                   `json:"is_filterable"`
 		IsPii        bool   `json:"is_pii"`
 		IsIndexed    bool   `json:"is_indexed"`
 	}
@@ -720,7 +724,10 @@ func (a *API) createAttributeHandler(c *gin.Context) {
 		return
 	}
 
-	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
+	// TODO: Add validation for DataTypeName against defined constants
+	// TODO: Add validation for DataTypeDetails based on DataTypeName
+
+	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataTypeName, req.DataTypeDetails, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed, req.Metadata)
 	if err != nil {
 		handleAPIError(c, http.StatusInternalServerError, "Failed to create attribute: "+err.Error())
 		return
@@ -787,10 +794,12 @@ func (a *API) updateAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	attributeID := c.Param("attribute_id")
 	var req struct {
-		Name         string `json:"name" binding:"required"`
-		DataType     string `json:"data_type" binding:"required"`
-		Description  string `json:"description"`
-		IsFilterable bool   `json:"is_filterable"`
+		Name            string                 `json:"name" binding:"required"`
+		DataTypeName    BaseDataTypeName       `json:"data_type_name" binding:"required"`
+		DataTypeDetails map[string]interface{} `json:"data_type_details"`
+		Description     string                 `json:"description"`
+		Metadata        map[string]interface{} `json:"metadata"`
+		IsFilterable    bool                   `json:"is_filterable"`
 		IsPii        bool   `json:"is_pii"`
 		IsIndexed    bool   `json:"is_indexed"`
 	}
@@ -805,7 +814,10 @@ func (a *API) updateAttributeHandler(c *gin.Context) {
 		return
 	}
 
-	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
+	// TODO: Add validation for DataTypeName against defined constants
+	// TODO: Add validation for DataTypeDetails based on DataTypeName
+
+	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataTypeName, req.DataTypeDetails, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed, req.Metadata)
 	if err != nil {
 		handleStoreError(c, err, "Attribute")
 		return
@@ -846,7 +858,7 @@ func (a *API) createDataSourceHandler(c *gin.Context) {
 	// The store.CreateDataSource function now expects DataSourceConfig object
 	// which includes EntityID.
 
-	ds, err := a.store.CreateDataSource(req)
+	ds, err := a.store.CreateDataSource(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Using handleStoreError which now calls handleAPIError
 		handleStoreError(c, err, "DataSource")
@@ -903,7 +915,7 @@ func (a *API) updateDataSourceHandler(c *gin.Context) {
 	// The store.UpdateDataSource function now expects DataSourceConfig object
 	// which includes EntityID.
 
-	ds, err := a.store.UpdateDataSource(sourceID, req)
+	ds, err := a.store.UpdateDataSource(sourceID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Data Source")
 		return
@@ -938,7 +950,7 @@ func (a *API) createFieldMappingHandler(c *gin.Context) {
 	req.SourceID = sourceID
 	req.ID = "" // ID is set by the store
 
-	mapping, err := a.store.CreateFieldMapping(req)
+	mapping, err := a.store.CreateFieldMapping(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Using handleStoreError which now calls handleAPIError
 		handleStoreError(c, err, "FieldMapping")
@@ -1008,7 +1020,7 @@ func (a *API) updateFieldMappingHandler(c *gin.Context) {
 	}
 	req.SourceID = sourceID
 
-	mapping, err := a.store.UpdateFieldMapping(sourceID, mappingID, req)
+	mapping, err := a.store.UpdateFieldMapping(sourceID, mappingID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Using handleStoreError which now calls handleAPIError
 		handleStoreError(c, err, "FieldMapping")
@@ -1053,7 +1065,7 @@ func (a *API) createGroupDefinitionHandler(c *gin.Context) {
 	// ID, CreatedAt, UpdatedAt are set by the store
 	req.ID = ""
 
-	groupDef, err := a.store.CreateGroupDefinition(req)
+	groupDef, err := a.store.CreateGroupDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		// Using handleStoreError which now calls handleAPIError
 		handleStoreError(c, err, "GroupDefinition")
@@ -1112,7 +1124,7 @@ func (a *API) updateGroupDefinitionHandler(c *gin.Context) {
 	// EntityID is not expected to be in the req payload for update, or if it is, it should match existing or be ignored by store.
 	// Store's UpdateGroupDefinition should handle this logic.
 
-	groupDef, err := a.store.UpdateGroupDefinition(groupID, req)
+	groupDef, err := a.store.UpdateGroupDefinition(groupID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Group Definition")
 		return
