@@ -110,3 +110,12 @@ type UpdateEntityRelationshipRequest struct {
 	RelationshipType *string `json:"relationship_type,omitempty" binding:"omitempty,oneof=ONE_TO_ONE ONE_TO_MANY MANY_TO_MANY"`
 	Description      *string `json:"description,omitempty" binding:"omitempty,max=1000"`
 }
+
+// PaginatedResponse is a standardized envelope for responses that return a list of items with pagination.
+// @Description PaginatedResponse provides a standard structure for APIs returning lists of data, including the data itself and pagination details.
+type PaginatedResponse struct {
+	Data   interface{} `json:"data"`             // Slice of the actual data items for the current page
+	Total  int64       `json:"total"`            // Total number of records available for the query
+	Limit  int         `json:"limit"`            // The number of items requested per page
+	Offset int         `json:"offset"`           // The starting offset of the returned items
+}
