@@ -2,10 +2,35 @@ package metadata
 
 import (
 	"net/http"
+	"fmt"
+	"net/http"
+	"strconv" // Added for Atoi
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	// Assuming ListParams is in models package after previous (intended) move
+	// If not, and it's still in metadata (store.go), this import might not be needed
+	// or "models" should be the alias for the current package "metadata"
+	// For now, we'll assume ListParams is accessible directly or via current package scope.
 )
+
+// DefaultLimitStr is used if models.DefaultLimitStr is not accessible due to tool state issues.
+const DefaultLimitStr = "20"
+
+// handleAPIError is a helper function to standardize API error responses.
+// It takes a gin.Context, an HTTP status code, and an error message string or an error object.
+func handleAPIError(c *gin.Context, statusCode int, err interface{}) {
+	var message string
+	switch e := err.(type) {
+	case error:
+		message = e.Error()
+	case string:
+		message = e
+	default:
+		message = "An unexpected error occurred"
+	}
+	c.JSON(statusCode, APIError{Code: statusCode, Message: message})
+}
 
 // API provides handlers for the metadata service.
 type API struct {
@@ -117,17 +142,18 @@ func (a *API) RegisterRoutes(router *gin.Engine) {
 // createEntityHandler handles requests to create a new entity.
 func (a *API) createEntityHandler(c *gin.Context) {
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Description string `json:"description"`
+		Name        string                 `json:"name" binding:"required"`
+		Description string                 `json:"description"`
+		Metadata    map[string]interface{} `json:"metadata"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
-	entity, err := a.store.CreateEntity(req.Name, req.Description)
+	entity, err := a.store.CreateEntity(req.Name, req.Description, req.Metadata)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create entity: " + err.Error()})
+		handleAPIError(c, http.StatusInternalServerError, "Failed to create entity: "+err.Error())
 		return
 	}
 	c.JSON(http.StatusCreated, entity)
@@ -135,8 +161,36 @@ func (a *API) createEntityHandler(c *gin.Context) {
 
 // listEntitiesHandler handles requests to list all entities.
 func (a *API) listEntitiesHandler(c *gin.Context) {
-	entities := a.store.ListEntities()
-	c.JSON(http.StatusOK, entities)
+	// Assuming a.store.ListEntities() returns []EntityDefinition and no error for now
+	// In a real scenario, if a.store.ListEntities could return an error:
+	// entities, total, err := a.store.ListEntities(offset, limit) // or similar
+	// if err != nil {
+	//    handleAPIError(c, http.StatusInternalServerError, "Failed to list entities: "+err.Error())
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr) // Use local or models.DefaultLimitStr
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
+		return
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	entities, total, err := a.store.ListEntities(params) // Call updated store method
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list entities: "+err.Error())
+		return
+	}
+
+	response := ListResponse{Data: entities, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 // getEntityHandler handles requests to get a specific entity by ID.
@@ -144,7 +198,7 @@ func (a *API) getEntityHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	entity, ok := a.store.GetEntity(entityID)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 	c.JSON(http.StatusOK, entity)
@@ -154,15 +208,16 @@ func (a *API) getEntityHandler(c *gin.Context) {
 func (a *API) updateEntityHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Description string `json:"description"`
+		Name        string                 `json:"name" binding:"required"`
+		Description string                 `json:"description"`
+		Metadata    map[string]interface{} `json:"metadata"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
-	entity, err := a.store.UpdateEntity(entityID, req.Name, req.Description)
+	entity, err := a.store.UpdateEntity(entityID, req.Name, req.Description, req.Metadata)
 	if err != nil {
 		handleStoreError(c, err, "Entity")
 		return
@@ -181,88 +236,173 @@ func (a *API) deleteEntityHandler(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
+// determineBulkResponseStatus determines the appropriate HTTP status code for a bulk operation.
+// It returns 201 for create if all items succeeded, 200 for update/delete if all items succeeded.
+// If any item failed, it returns 207 Multi-Status.
+// If results are empty, it returns 200 OK.
+func determineBulkResponseStatus(results []BulkOperationResultItem, operationType string) int {
+	if len(results) == 0 {
+		return http.StatusOK // Or perhaps http.StatusNoContent if preferred for empty requests
+	}
+
+	allSucceeded := true
+	for _, result := range results {
+		if !result.Success {
+			allSucceeded = false
+			break
+		}
+	}
+
+	if allSucceeded {
+		if operationType == "create" {
+			return http.StatusCreated
+		}
+		return http.StatusOK
+	}
+	return http.StatusMultiStatus
+}
+
+// --- Bulk Entity Handlers ---
+
+// bulkCreateEntitiesHandler handles requests to create multiple entities in bulk.
+func (a *API) bulkCreateEntitiesHandler(c *gin.Context) {
+	var req BulkCreateEntitiesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
+		return
+	}
+
+	if len(req.Entities) == 0 {
+		c.JSON(http.StatusOK, BulkOperationResponse{Results: []BulkOperationResultItem{}})
+		return
+	}
+
+	results, err := a.store.BulkCreateEntities(req.Entities)
+	if err != nil {
+		// This would be an unexpected store-level error, not individual item errors
+		handleAPIError(c, http.StatusInternalServerError, "Failed to process bulk create entities: "+err.Error())
+		return
+	}
+
+	responseStatus := determineBulkResponseStatus(results, "create")
+	c.JSON(responseStatus, BulkOperationResponse{Results: results})
+}
+
+// bulkUpdateEntitiesHandler handles requests to update multiple entities in bulk.
+func (a *API) bulkUpdateEntitiesHandler(c *gin.Context) {
+	var req BulkUpdateEntitiesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
+		return
+	}
+
+	if len(req.Entities) == 0 {
+		c.JSON(http.StatusOK, BulkOperationResponse{Results: []BulkOperationResultItem{}})
+		return
+	}
+
+	results, err := a.store.BulkUpdateEntities(req.Entities)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to process bulk update entities: "+err.Error())
+		return
+	}
+
+	responseStatus := determineBulkResponseStatus(results, "update")
+	c.JSON(responseStatus, BulkOperationResponse{Results: results})
+}
+
+// bulkDeleteEntitiesHandler handles requests to delete multiple entities in bulk.
+func (a *API) bulkDeleteEntitiesHandler(c *gin.Context) {
+	var req BulkDeleteEntitiesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
+		return
+	}
+
+	if len(req.EntityIDs) == 0 {
+		c.JSON(http.StatusOK, BulkOperationResponse{Results: []BulkOperationResultItem{}})
+		return
+	}
+
+	results, err := a.store.BulkDeleteEntities(req.EntityIDs)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to process bulk delete entities: "+err.Error())
+		return
+	}
+
+	responseStatus := determineBulkResponseStatus(results, "delete")
+	c.JSON(responseStatus, BulkOperationResponse{Results: results})
+}
 
 // --- EntityRelationshipDefinition Handlers ---
 
 func (a *API) createEntityRelationshipHandler(c *gin.Context) {
 	var req EntityRelationshipDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// ID, CreatedAt, UpdatedAt are set by the store
-	req.ID = "" 
+	req.ID = ""
 
 	// Basic validation for RelationshipType
 	switch req.RelationshipType {
-	case OneToOne, OneToMany, ManyToOne:
+	case OneToOne, OneToMany, ManyToOne, ManyToMany: // Added ManyToMany
 		// valid
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE"})
+		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, or MANY_TO_MANY")
 		return
 	}
-	
+
 	// TODO: Add validation to check if Source/Target Entity/Attribute IDs exist
 	// This requires querying the store for those entities/attributes.
 	// For now, we rely on DB foreign key constraints.
 
-	er, err := a.store.CreateEntityRelationship(req)
+	er, err := a.store.CreateEntityRelationship(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "already exists") {
-			c.JSON(http.StatusConflict, gin.H{"error": "Failed to create entity relationship: " + err.Error()})
-		} else if strings.Contains(err.Error(), "violates foreign key constraint") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity or attribute ID: " + err.Error()})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create entity relationship: " + err.Error()})
-		}
+		// Refactored handleStoreError now uses handleAPIError
+		handleStoreError(c, err, "EntityRelationship")
 		return
 	}
 	c.JSON(http.StatusCreated, er)
 }
 
 func (a *API) listEntityRelationshipsHandler(c *gin.Context) {
-	// TODO: Implement pagination (offset, limit) and filtering (e.g., by source_entity_id)
-	// For now, lists all.
-	// Example query params: /entity-relationships?source_entity_id=xxx&offset=0&limit=20
-	
 	sourceEntityID := c.Query("source_entity_id")
-	// offsetStr := c.DefaultQuery("offset", "0")
-	// limitStr := c.DefaultQuery("limit", "20") // Default limit to 20
-	// offset, errOff := strconv.Atoi(offsetStr)
-	// limit, errLim := strconv.Atoi(limitStr)
+	// Placeholder for actual pagination parameters (offset, limit)
+	// offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	// limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
-	// if errOff != nil || errLim != nil || offset < 0 || limit <= 0 {
-	// 	c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pagination parameters"})
-	// 	return
-	// }
-	
-	var relationships []EntityRelationshipDefinition
-	var err error
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr) // Use local or models.DefaultLimitStr
 
-	if sourceEntityID != "" {
-		// This store method needs to be created or adapted if it doesn't exist.
-		// Assuming GetEntityRelationshipsBySourceEntity exists as per plan.
-		relationships, err = a.store.GetEntityRelationshipsBySourceEntity(sourceEntityID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list entity relationships by source entity: " + err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"data": relationships, "total": len(relationships)}) // total count for filtered list
-	} else {
-		// Using a simplified ListEntityRelationships for now as pagination is not fully implemented in store method signature yet.
-		// The planned store.ListEntityRelationships(offset, limit int) ([]*EntityRelationshipDefinition, int64, error)
-		// would be used here. For now, let's assume a simpler ListAll type method or adapt.
-		// For simplicity, let's assume a temporary ListAllEntityRelationships method or adapt the existing one.
-		// This part needs to align with the actual store method.
-		// Let's assume ListEntityRelationships(0, 1000) lists all up to 1000 for now.
-		rels, total, listErr := a.store.ListEntityRelationships(0, 1000) // Temporary fixed limit for non-paginated version
-		if listErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list entity relationships: " + listErr.Error()})
-			return
-		}
-		relationships = rels
-		c.JSON(http.StatusOK, gin.H{"data": relationships, "total": total})
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
+		return
 	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	filters := make(map[string]interface{})
+	if sourceEntityID != "" {
+		filters["source_entity_id"] = sourceEntityID
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: filters}
+
+	relationships, total, err := a.store.ListEntityRelationships(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list entity relationships: "+err.Error())
+		return
+	}
+
+	response := ListResponse{Data: relationships, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getEntityRelationshipHandler(c *gin.Context) {
@@ -279,30 +419,25 @@ func (a *API) updateEntityRelationshipHandler(c *gin.Context) {
 	erID := c.Param("id")
 	var req EntityRelationshipDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
-	
+
 	// Basic validation for RelationshipType
 	switch req.RelationshipType {
-	case OneToOne, OneToMany, ManyToOne:
+	case OneToOne, OneToMany, ManyToOne, ManyToMany: // Added ManyToMany
 		// valid
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, or MANY_TO_ONE"})
+		handleAPIError(c, http.StatusBadRequest, "Invalid relationship_type. Must be ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, or MANY_TO_MANY")
 		return
 	}
 
 	// TODO: Add validation for IDs if necessary
 
-	er, err := a.store.UpdateEntityRelationship(erID, req)
+	er, err := a.store.UpdateEntityRelationship(erID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "already exists") {
-			c.JSON(http.StatusConflict, gin.H{"error": "Failed to update entity relationship: " + err.Error()})
-		} else if strings.Contains(err.Error(), "violates foreign key constraint") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity or attribute ID: " + err.Error()})
-		} else {
-			handleStoreError(c, err, "EntityRelationship")
-		}
+		// Refactored handleStoreError now uses handleAPIError
+		handleStoreError(c, err, "EntityRelationship")
 		return
 	}
 	c.JSON(http.StatusOK, er)
@@ -324,32 +459,47 @@ func (a *API) deleteEntityRelationshipHandler(c *gin.Context) {
 func (a *API) createScheduleDefinitionHandler(c *gin.Context) {
 	var req ScheduleDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// ID, CreatedAt, UpdatedAt are set by the store
-	req.ID = "" 
+	req.ID = ""
 
-	schedule, err := a.store.CreateScheduleDefinition(req)
+	schedule, err := a.store.CreateScheduleDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		// More specific error handling can be added if store returns typed errors
-		if strings.Contains(err.Error(), "unique constraint") {
-			c.JSON(http.StatusConflict, gin.H{"error": "Failed to create schedule: " + err.Error()})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create schedule: " + err.Error()})
-		}
+		// Using handleStoreError which now calls handleAPIError
+		handleStoreError(c, err, "ScheduleDefinition")
 		return
 	}
 	c.JSON(http.StatusCreated, schedule)
 }
 
 func (a *API) listScheduleDefinitionsHandler(c *gin.Context) {
-	schedules, err := a.store.ListScheduleDefinitions()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list schedules: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, schedules)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	schedules, total, err := a.store.ListScheduleDefinitions(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list schedules: "+err.Error())
+		return
+	}
+
+	response := ListResponse{Data: schedules, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getScheduleDefinitionHandler(c *gin.Context) {
@@ -366,11 +516,11 @@ func (a *API) updateScheduleDefinitionHandler(c *gin.Context) {
 	scheduleID := c.Param("schedule_id")
 	var req ScheduleDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
-	schedule, err := a.store.UpdateScheduleDefinition(scheduleID, req)
+	schedule, err := a.store.UpdateScheduleDefinition(scheduleID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Schedule")
 		return
@@ -393,11 +543,11 @@ func (a *API) deleteScheduleDefinitionHandler(c *gin.Context) {
 func (a *API) createWorkflowDefinitionHandler(c *gin.Context) {
 	var req WorkflowDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	req.ID = "" // Set by store
-	workflow, err := a.store.CreateWorkflowDefinition(req)
+	workflow, err := a.store.CreateWorkflowDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Workflow Definition")
 		return
@@ -406,12 +556,31 @@ func (a *API) createWorkflowDefinitionHandler(c *gin.Context) {
 }
 
 func (a *API) listWorkflowDefinitionsHandler(c *gin.Context) {
-	workflows, err := a.store.ListWorkflowDefinitions()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list workflow definitions: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, workflows)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	workflows, total, err := a.store.ListWorkflowDefinitions(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list workflow definitions: "+err.Error())
+		return
+	}
+
+	response := ListResponse{Data: workflows, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getWorkflowDefinitionHandler(c *gin.Context) {
@@ -428,10 +597,10 @@ func (a *API) updateWorkflowDefinitionHandler(c *gin.Context) {
 	workflowID := c.Param("workflow_id")
 	var req WorkflowDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
-	workflow, err := a.store.UpdateWorkflowDefinition(workflowID, req)
+	workflow, err := a.store.UpdateWorkflowDefinition(workflowID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Workflow Definition")
 		return
@@ -454,11 +623,11 @@ func (a *API) deleteWorkflowDefinitionHandler(c *gin.Context) {
 func (a *API) createActionTemplateHandler(c *gin.Context) {
 	var req ActionTemplate
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	req.ID = "" // Set by store
-	template, err := a.store.CreateActionTemplate(req)
+	template, err := a.store.CreateActionTemplate(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Action Template")
 		return
@@ -467,12 +636,31 @@ func (a *API) createActionTemplateHandler(c *gin.Context) {
 }
 
 func (a *API) listActionTemplatesHandler(c *gin.Context) {
-	templates, err := a.store.ListActionTemplates()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list action templates: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, templates)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	templates, total, err := a.store.ListActionTemplates(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list action templates: "+err.Error())
+		return
+	}
+
+	response := ListResponse{Data: templates, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getActionTemplateHandler(c *gin.Context) {
@@ -489,10 +677,10 @@ func (a *API) updateActionTemplateHandler(c *gin.Context) {
 	templateID := c.Param("template_id")
 	var req ActionTemplate
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
-	template, err := a.store.UpdateActionTemplate(templateID, req)
+	template, err := a.store.UpdateActionTemplate(templateID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Action Template")
 		return
@@ -516,27 +704,32 @@ func (a *API) deleteActionTemplateHandler(c *gin.Context) {
 func (a *API) createAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	var req struct {
-		Name         string `json:"name" binding:"required"`
-		DataType     string `json:"data_type" binding:"required"`
-		Description  string `json:"description"`
-		IsFilterable bool   `json:"is_filterable"`
+		Name            string                 `json:"name" binding:"required"`
+		DataTypeName    BaseDataTypeName       `json:"data_type_name" binding:"required"`
+		DataTypeDetails map[string]interface{} `json:"data_type_details"`
+		Description     string                 `json:"description"`
+		Metadata        map[string]interface{} `json:"metadata"`
+		IsFilterable    bool                   `json:"is_filterable"`
 		IsPii        bool   `json:"is_pii"`
 		IsIndexed    bool   `json:"is_indexed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
 	// Check if entity exists
 	if _, ok := a.store.GetEntity(entityID); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 
-	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
+	// TODO: Add validation for DataTypeName against defined constants
+	// TODO: Add validation for DataTypeDetails based on DataTypeName
+
+	attribute, err := a.store.CreateAttribute(entityID, req.Name, req.DataTypeName, req.DataTypeDetails, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed, req.Metadata)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attribute: " + err.Error()})
+		handleAPIError(c, http.StatusInternalServerError, "Failed to create attribute: "+err.Error())
 		return
 	}
 	c.JSON(http.StatusCreated, attribute)
@@ -547,16 +740,34 @@ func (a *API) listAttributesHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	// Check if entity exists
 	if _, ok := a.store.GetEntity(entityID); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 
-	attributes, err := a.store.ListAttributes(entityID)
-	if err != nil { // Should not happen if entity existence is checked
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list attributes: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, attributes)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	attributes, total, err := a.store.ListAttributes(entityID, params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list attributes for entity "+entityID+": "+err.Error())
+		return
+	}
+	response := ListResponse{Data: attributes, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 // getAttributeHandler handles requests to get a specific attribute by ID.
@@ -566,13 +777,13 @@ func (a *API) getAttributeHandler(c *gin.Context) {
 
 	// Check if entity exists
 	if _, ok := a.store.GetEntity(entityID); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 
 	attribute, ok := a.store.GetAttribute(entityID, attributeID)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Attribute not found"})
+		handleAPIError(c, http.StatusNotFound, "Attribute not found")
 		return
 	}
 	c.JSON(http.StatusOK, attribute)
@@ -583,25 +794,30 @@ func (a *API) updateAttributeHandler(c *gin.Context) {
 	entityID := c.Param("entity_id")
 	attributeID := c.Param("attribute_id")
 	var req struct {
-		Name         string `json:"name" binding:"required"`
-		DataType     string `json:"data_type" binding:"required"`
-		Description  string `json:"description"`
-		IsFilterable bool   `json:"is_filterable"`
+		Name            string                 `json:"name" binding:"required"`
+		DataTypeName    BaseDataTypeName       `json:"data_type_name" binding:"required"`
+		DataTypeDetails map[string]interface{} `json:"data_type_details"`
+		Description     string                 `json:"description"`
+		Metadata        map[string]interface{} `json:"metadata"`
+		IsFilterable    bool                   `json:"is_filterable"`
 		IsPii        bool   `json:"is_pii"`
 		IsIndexed    bool   `json:"is_indexed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 
 	// Check if entity exists first
 	if _, ok := a.store.GetEntity(entityID); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 
-	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataType, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed)
+	// TODO: Add validation for DataTypeName against defined constants
+	// TODO: Add validation for DataTypeDetails based on DataTypeName
+
+	attribute, err := a.store.UpdateAttribute(entityID, attributeID, req.Name, req.DataTypeName, req.DataTypeDetails, req.Description, req.IsFilterable, req.IsPii, req.IsIndexed, req.Metadata)
 	if err != nil {
 		handleStoreError(c, err, "Attribute")
 		return
@@ -616,7 +832,7 @@ func (a *API) deleteAttributeHandler(c *gin.Context) {
 
 	// Check if entity exists
 	if _, ok := a.store.GetEntity(entityID); !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entity not found"})
+		handleAPIError(c, http.StatusNotFound, "Entity not found")
 		return
 	}
 
@@ -633,7 +849,7 @@ func (a *API) deleteAttributeHandler(c *gin.Context) {
 func (a *API) createDataSourceHandler(c *gin.Context) {
 	var req DataSourceConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// ID, CreatedAt, UpdatedAt are set by the store
@@ -642,21 +858,40 @@ func (a *API) createDataSourceHandler(c *gin.Context) {
 	// The store.CreateDataSource function now expects DataSourceConfig object
 	// which includes EntityID.
 
-	ds, err := a.store.CreateDataSource(req)
+	ds, err := a.store.CreateDataSource(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create data source: " + err.Error()})
+		// Using handleStoreError which now calls handleAPIError
+		handleStoreError(c, err, "DataSource")
 		return
 	}
 	c.JSON(http.StatusCreated, ds)
 }
 
 func (a *API) listDataSourcesHandler(c *gin.Context) {
-	sources, err := a.store.GetDataSources()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list data sources: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, sources)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	sources, total, err := a.store.GetDataSources(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list data sources: "+err.Error())
+		return
+	}
+	response := ListResponse{Data: sources, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getDataSourceHandler(c *gin.Context) {
@@ -673,14 +908,14 @@ func (a *API) updateDataSourceHandler(c *gin.Context) {
 	sourceID := c.Param("source_id")
 	var req DataSourceConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// Ensure EntityID is passed if provided in the request for update
 	// The store.UpdateDataSource function now expects DataSourceConfig object
 	// which includes EntityID.
 
-	ds, err := a.store.UpdateDataSource(sourceID, req)
+	ds, err := a.store.UpdateDataSource(sourceID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Data Source")
 		return
@@ -704,25 +939,21 @@ func (a *API) createFieldMappingHandler(c *gin.Context) {
 	sourceID := c.Param("source_id")
 	var req DataSourceFieldMapping
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// Ensure SourceID from path matches payload, or set it from path
 	if req.SourceID != "" && req.SourceID != sourceID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "SourceID in path and payload do not match"})
+		handleAPIError(c, http.StatusBadRequest, "SourceID in path and payload do not match")
 		return
 	}
 	req.SourceID = sourceID
 	req.ID = "" // ID is set by the store
 
-	mapping, err := a.store.CreateFieldMapping(req)
+	mapping, err := a.store.CreateFieldMapping(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		// More specific error handling for FK violations might be needed if store returns typed errors
-		if strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Failed to create field mapping: " + err.Error()})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create field mapping: " + err.Error()})
-		}
+		// Using handleStoreError which now calls handleAPIError
+		handleStoreError(c, err, "FieldMapping")
 		return
 	}
 	c.JSON(http.StatusCreated, mapping)
@@ -732,16 +963,34 @@ func (a *API) listFieldMappingsHandler(c *gin.Context) {
 	sourceID := c.Param("source_id")
 	// Check if data source exists
 	if _, err := a.store.GetDataSource(sourceID); err != nil {
-		handleStoreError(c, err, "Data Source")
+		handleStoreError(c, err, "Data Source") // This already uses handleAPIError
 		return
 	}
 
-	mappings, err := a.store.GetFieldMappings(sourceID)
-	if err != nil { // Should ideally not happen if source existence is checked
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list field mappings: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, mappings)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	mappings, total, err := a.store.GetFieldMappings(sourceID, params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list field mappings for source "+sourceID+": "+err.Error())
+		return
+	}
+	response := ListResponse{Data: mappings, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 func (a *API) getFieldMappingHandler(c *gin.Context) {
@@ -761,24 +1010,20 @@ func (a *API) updateFieldMappingHandler(c *gin.Context) {
 	mappingID := c.Param("mapping_id")
 	var req DataSourceFieldMapping
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// Ensure SourceID from path matches payload, or set it from path
 	if req.SourceID != "" && req.SourceID != sourceID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "SourceID in path and payload do not match"})
+		handleAPIError(c, http.StatusBadRequest, "SourceID in path and payload do not match")
 		return
 	}
 	req.SourceID = sourceID
 
-	mapping, err := a.store.UpdateFieldMapping(sourceID, mappingID, req)
+	mapping, err := a.store.UpdateFieldMapping(sourceID, mappingID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		// More specific error handling for FK violations
-		if strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Failed to update field mapping: " + err.Error()})
-		} else {
-			handleStoreError(c, err, "Field Mapping")
-		}
+		// Using handleStoreError which now calls handleAPIError
+		handleStoreError(c, err, "FieldMapping")
 		return
 	}
 	c.JSON(http.StatusOK, mapping)
@@ -796,13 +1041,15 @@ func (a *API) deleteFieldMappingHandler(c *gin.Context) {
 }
 
 // handleStoreError is a helper to reduce repetition in error handling
+// It now calls handleAPIError for standardized error responses.
 func handleStoreError(c *gin.Context, err error, resourceName string) {
-	if strings.Contains(err.Error(), "not found") {
-		c.JSON(http.StatusNotFound, gin.H{"error": resourceName + " not found"})
-	} else if strings.Contains(err.Error(), "cannot be empty") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "not found") {
+		handleAPIError(c, http.StatusNotFound, fmt.Sprintf("%s not found: %s", resourceName, errMsg))
+	} else if strings.Contains(errMsg, "cannot be empty") || strings.Contains(errMsg, "violates foreign key constraint") || strings.Contains(errMsg, "unique constraint") || strings.Contains(errMsg, "already exists") {
+		handleAPIError(c, http.StatusBadRequest, fmt.Sprintf("Invalid input for %s: %s", resourceName, errMsg))
 	} else {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process " + strings.ToLower(resourceName) + ": " + err.Error()})
+		handleAPIError(c, http.StatusInternalServerError, fmt.Sprintf("Failed to process %s: %s", strings.ToLower(resourceName), errMsg))
 	}
 }
 
@@ -812,22 +1059,16 @@ func handleStoreError(c *gin.Context, err error, resourceName string) {
 func (a *API) createGroupDefinitionHandler(c *gin.Context) {
 	var req GroupDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// ID, CreatedAt, UpdatedAt are set by the store
 	req.ID = ""
 
-	groupDef, err := a.store.CreateGroupDefinition(req)
+	groupDef, err := a.store.CreateGroupDefinition(req, req.Metadata) // Pass req.Metadata
 	if err != nil {
-		// Check if it's a "not found" error for the entity_id
-		if strings.Contains(err.Error(), "entity with ID") && strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		} else if strings.Contains(err.Error(), "cannot be empty") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group definition: " + err.Error()})
-		}
+		// Using handleStoreError which now calls handleAPIError
+		handleStoreError(c, err, "GroupDefinition")
 		return
 	}
 	c.JSON(http.StatusCreated, groupDef)
@@ -835,12 +1076,30 @@ func (a *API) createGroupDefinitionHandler(c *gin.Context) {
 
 // listGroupDefinitionsHandler handles requests to list all group definitions.
 func (a *API) listGroupDefinitionsHandler(c *gin.Context) {
-	groupDefs, err := a.store.ListGroupDefinitions()
-	if err != nil { // Should generally not happen for a list operation unless there's a fundamental store issue
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list group definitions: " + err.Error()})
+	offsetStr := c.DefaultQuery("offset", "0")
+	limitStr := c.DefaultQuery("limit", DefaultLimitStr)
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid offset parameter. Must be a non-negative integer.")
 		return
 	}
-	c.JSON(http.StatusOK, groupDefs)
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		handleAPIError(c, http.StatusBadRequest, "Invalid limit parameter. Must be a positive integer.")
+		return
+	}
+
+	params := ListParams{Offset: offset, Limit: limit, Filters: make(map[string]interface{})}
+
+	groupDefs, total, err := a.store.ListGroupDefinitions(params)
+	if err != nil {
+		handleAPIError(c, http.StatusInternalServerError, "Failed to list group definitions: "+err.Error())
+		return
+	}
+	response := ListResponse{Data: groupDefs, Total: total}
+	c.JSON(http.StatusOK, response)
 }
 
 // getGroupDefinitionHandler handles requests to get a specific group definition by ID.
@@ -859,13 +1118,13 @@ func (a *API) updateGroupDefinitionHandler(c *gin.Context) {
 	groupID := c.Param("group_id")
 	var req GroupDefinition
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
+		handleAPIError(c, http.StatusBadRequest, "Invalid input: "+err.Error())
 		return
 	}
 	// EntityID is not expected to be in the req payload for update, or if it is, it should match existing or be ignored by store.
 	// Store's UpdateGroupDefinition should handle this logic.
 
-	groupDef, err := a.store.UpdateGroupDefinition(groupID, req)
+	groupDef, err := a.store.UpdateGroupDefinition(groupID, req, req.Metadata) // Pass req.Metadata
 	if err != nil {
 		handleStoreError(c, err, "Group Definition")
 		return
