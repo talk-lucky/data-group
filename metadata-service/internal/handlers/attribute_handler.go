@@ -1,15 +1,37 @@
 package handlers
 
 import (
+	"errors" // Already present
 	"net/http"
+	"strings" // Usage will be reduced/removed
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq" // Added for pq.Error
 	"gorm.io/gorm"
+
+	"log"     // Added for logging
+	"strconv" // Added for string to int conversion
 
 	"metadata-service/internal/database"
 	"metadata-service/internal/models"
 )
+
+// Constants for pagination and sorting for Attributes
+const (
+	DefaultAttributeLimit       = 10
+	MaxAttributeLimit           = 100
+	DefaultAttributeSortOrder   = "asc"
+	DefaultAttributeSortBy      = "created_at"
+)
+
+// AllowedAttributeSortByFields defines the fields by which a list of attributes can be sorted.
+var AllowedAttributeSortByFields = map[string]bool{
+	"name":         true,
+	"data_type":    true,
+	"created_at":   true,
+	"updated_at":   true,
+}
 
 // CreateAttribute godoc
 // @Summary Create a new attribute for an entity
@@ -20,21 +42,22 @@ import (
 // @Param   entity_id      path   string     true  "Entity ID (UUID)"
 // @Param   attribute_definition  body   models.CreateAttributeRequest   true  "Attribute Definition to create"
 // @Success 201 {object} models.AttributeDefinition "Successfully created attribute definition"
-// @Failure 400 {object} map[string]string "Invalid request payload or Entity ID format"
-// @Failure 404 {object} map[string]string "Entity definition not found"
-// @Failure 500 {object} map[string]string "Internal server error or unique constraint violation"
+// @Failure 400 {object} models.APIError "Bad Request (e.g., validation error, invalid Entity ID format - see 'code' in response for specifics like VALIDATION_ERROR, INVALID_ID_FORMAT)"
+// @Failure 404 {object} models.APIError "Not Found (e.g., parent entity not found - see 'code' in response for specifics like ENTITY_NOT_FOUND)"
+// @Failure 409 {object} models.APIError "Conflict (e.g., duplicate attribute name for the entity - see 'code' in response for specifics like DUPLICATE_NAME)"
+// @Failure 500 {object} models.APIError "Internal Server Error (see 'code' in response for specifics like INTERNAL_SERVER_ERROR)"
 // @Router /entities/{id}/attributes [post]
 func CreateAttribute(c *gin.Context) {
-	entityIDStr := c.Param("id") // Changed from entity_id to id
+	entityIDStr := c.Param("id")
 	entityID, err := uuid.Parse(entityIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Entity ID format"})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidIDFormat, "Invalid Entity ID format", gin.H{"id": entityIDStr, "error": err.Error()})
 		return
 	}
 
 	var req models.CreateAttributeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid request payload", gin.H{"reason": err.Error()})
 		return
 	}
 
@@ -43,22 +66,22 @@ func CreateAttribute(c *gin.Context) {
 	// Check if parent entity exists
 	var parentEntity models.EntityDefinition
 	if err := db.First(&parentEntity, "id = ?", entityID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Parent entity definition not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			RespondWithError(c, http.StatusNotFound, models.ErrorCodeEntityNotFound, "Parent entity definition not found", gin.H{"entity_id": entityID})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check parent entity: " + err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to check parent entity existence", nil)
 		}
 		return
 	}
 
 	attribute := models.AttributeDefinition{
-		ID:           uuid.New(), // Generate new UUID for the attribute
+		ID:           uuid.New(),
 		EntityID:     entityID,
 		Name:         req.Name,
 		DataType:     req.DataType,
 		Description:  req.Description,
-		IsFilterable: false, // Default, will be updated if provided
-		IsPII:        false, // Default, will be updated if provided
+		IsFilterable: false,
+		IsPII:        false,
 	}
 	if req.IsFilterable != nil {
 		attribute.IsFilterable = *req.IsFilterable
@@ -68,13 +91,17 @@ func CreateAttribute(c *gin.Context) {
 	}
 
 	if err := db.Create(&attribute).Error; err != nil {
-		// Consider checking for unique constraint violation specifically
-		// if db.Dialector.Name() == "postgres" && strings.Contains(err.Error(), "unique constraint") ...
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attribute definition: " + err.Error()})
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) {
+			if pqErr.Code == "23505" { // PostgreSQL error code for unique_violation
+				RespondWithError(c, http.StatusConflict, models.ErrorCodeDuplicateName, "Attribute with this name already exists for the entity.", gin.H{"name": attribute.Name, "entity_id": entityID})
+				return
+			}
+		}
+		RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to create attribute definition.", nil)
 		return
 	}
-
-	c.JSON(http.StatusCreated, attribute)
+	RespondWithSuccess(c, http.StatusCreated, attribute)
 }
 
 // ListAttributes godoc
@@ -84,37 +111,80 @@ func CreateAttribute(c *gin.Context) {
 // @Produce  json
 // @Param   entity_id      path   string     true  "Entity ID (UUID)"
 // @Success 200 {array} models.AttributeDefinition "Successfully retrieved list of attribute definitions"
-// @Failure 400 {object} map[string]string "Invalid Entity ID format"
-// @Failure 404 {object} map[string]string "Entity definition not found"
-// @Failure 500 {object} map[string]string "Internal server error"
+// @Failure 400 {object} models.APIError "Bad Request (e.g., invalid Entity ID format - see 'code' in response for specifics like INVALID_ID_FORMAT)"
+// @Failure 404 {object} models.APIError "Not Found (e.g., parent entity not found - see 'code' in response for specifics like ENTITY_NOT_FOUND)"
+// @Failure 500 {object} models.APIError "Internal Server Error (see 'code' in response for specifics like INTERNAL_SERVER_ERROR)"
 // @Router /entities/{id}/attributes [get]
 func ListAttributes(c *gin.Context) {
-	entityIDStr := c.Param("id") // Changed from entity_id to id
+	entityIDStr := c.Param("id")
 	entityID, err := uuid.Parse(entityIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Entity ID format"})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidIDFormat, "Invalid Entity ID format", gin.H{"id": entityIDStr, "error": err.Error()})
 		return
 	}
 
+	// Pagination and Sorting parameters
+	limitStr := c.DefaultQuery("limit", strconv.Itoa(DefaultAttributeLimit))
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid limit parameter: not a number.", gin.H{"limit": limitStr})
+		return
+	}
+	if limit <= 0 {
+		limit = DefaultAttributeLimit
+	} else if limit > MaxAttributeLimit {
+		limit = MaxAttributeLimit
+	}
+
+	offsetStr := c.DefaultQuery("offset", "0")
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil {
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid offset parameter: not a number.", gin.H{"offset": offsetStr})
+		return
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	sortBy := c.DefaultQuery("sort_by", DefaultAttributeSortBy)
+	if _, isValid := AllowedAttributeSortByFields[sortBy]; !isValid {
+		allowedFields := make([]string, 0, len(AllowedAttributeSortByFields))
+		for k := range AllowedAttributeSortByFields {
+			allowedFields = append(allowedFields, k)
+		}
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid sort_by field for attributes.", gin.H{"field": sortBy, "allowed": allowedFields})
+		return
+	}
+
+	sortOrder := strings.ToLower(c.DefaultQuery("sort_order", DefaultAttributeSortOrder))
+	if sortOrder != "asc" && sortOrder != "desc" {
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid sort_order value. Must be 'asc' or 'desc'.", gin.H{"value": c.Query("sort_order")})
+		return
+	}
+
+	log.Printf("ListAttributes for EntityID %s: Validated params: limit=%d, offset=%d, sortBy=%s, sortOrder=%s", entityID, limit, offset, sortBy, sortOrder)
+
 	db := database.GetDB()
 
-	// Check if parent entity exists to provide a 404 if entity is not found
+	// Check if parent entity exists
 	var parentEntity models.EntityDefinition
 	if err := db.First(&parentEntity, "id = ?", entityID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Entity definition not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			RespondWithError(c, http.StatusNotFound, models.ErrorCodeEntityNotFound, "Parent entity definition not found", gin.H{"entity_id": entityID})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check parent entity: " + err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to check parent entity existence", nil)
 		}
 		return
 	}
 
 	var attributes []models.AttributeDefinition
+	// This DB query will be updated in a later step
 	if err := db.Where("entity_id = ?", entityID).Find(&attributes).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list attribute definitions: " + err.Error()})
+		RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to list attribute definitions", nil)
 		return
 	}
-	c.JSON(http.StatusOK, attributes)
+	// This response will change in a later step
+	RespondWithSuccess(c, http.StatusOK, attributes)
 }
 
 // GetAttribute godoc
@@ -124,29 +194,29 @@ func ListAttributes(c *gin.Context) {
 // @Produce  json
 // @Param   attribute_id     path   string     true  "Attribute Definition ID (UUID)"
 // @Success 200 {object} models.AttributeDefinition "Successfully retrieved attribute definition"
-// @Failure 400 {object} map[string]string "Invalid ID format"
-// @Failure 404 {object} map[string]string "Attribute definition not found"
-// @Failure 500 {object} map[string]string "Internal server error"
+// @Failure 400 {object} models.APIError "Bad Request (e.g., invalid Attribute ID format - see 'code' in response for specifics like INVALID_ID_FORMAT)"
+// @Failure 404 {object} models.APIError "Not Found (e.g., attribute not found - see 'code' in response for specifics like ATTRIBUTE_NOT_FOUND)"
+// @Failure 500 {object} models.APIError "Internal Server Error (see 'code' in response for specifics like INTERNAL_SERVER_ERROR)"
 // @Router /attributes/{attribute_id} [get]
 func GetAttribute(c *gin.Context) {
 	attributeIDStr := c.Param("attribute_id")
 	attributeID, err := uuid.Parse(attributeIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Attribute ID format"})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidIDFormat, "Invalid Attribute ID format", gin.H{"id": attributeIDStr, "error": err.Error()})
 		return
 	}
 
 	db := database.GetDB()
 	var attribute models.AttributeDefinition
 	if err := db.First(&attribute, "id = ?", attributeID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Attribute definition not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			RespondWithError(c, http.StatusNotFound, models.ErrorCodeAttributeNotFound, "Attribute definition not found", gin.H{"attribute_id": attributeID})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get attribute definition: " + err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to get attribute definition", nil)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, attribute)
+	RespondWithSuccess(c, http.StatusOK, attribute)
 }
 
 // UpdateAttribute godoc
@@ -158,31 +228,32 @@ func GetAttribute(c *gin.Context) {
 // @Param   attribute_id     path   string     true  "Attribute Definition ID (UUID)"
 // @Param   attribute_definition  body   models.UpdateAttributeRequest   true  "Attribute Definition fields to update"
 // @Success 200 {object} models.AttributeDefinition "Successfully updated attribute definition"
-// @Failure 400 {object} map[string]string "Invalid request payload or ID format"
-// @Failure 404 {object} map[string]string "Attribute definition not found"
-// @Failure 500 {object} map[string]string "Internal server error"
+// @Failure 400 {object} models.APIError "Bad Request (e.g., validation error, invalid ID format, invalid DataType - see 'code' in response for specifics like VALIDATION_ERROR, INVALID_ID_FORMAT, INVALID_ENUM_VALUE)"
+// @Failure 404 {object} models.APIError "Not Found (e.g., attribute not found - see 'code' in response for specifics like ATTRIBUTE_NOT_FOUND)"
+// @Failure 409 {object} models.APIError "Conflict (e.g., duplicate attribute name for the entity - see 'code' in response for specifics like DUPLICATE_NAME)"
+// @Failure 500 {object} models.APIError "Internal Server Error (see 'code' in response for specifics like INTERNAL_SERVER_ERROR)"
 // @Router /attributes/{attribute_id} [put]
 func UpdateAttribute(c *gin.Context) {
 	attributeIDStr := c.Param("attribute_id")
 	attributeID, err := uuid.Parse(attributeIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Attribute ID format"})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidIDFormat, "Invalid Attribute ID format", gin.H{"id": attributeIDStr, "error": err.Error()})
 		return
 	}
 
 	var req models.UpdateAttributeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeValidation, "Invalid request payload", gin.H{"reason": err.Error()})
 		return
 	}
 
 	db := database.GetDB()
 	var attribute models.AttributeDefinition
 	if err := db.First(&attribute, "id = ?", attributeID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Attribute definition not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			RespondWithError(c, http.StatusNotFound, models.ErrorCodeAttributeNotFound, "Attribute definition not found", gin.H{"attribute_id": attributeID})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find attribute definition: " + err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to find attribute definition for update", nil)
 		}
 		return
 	}
@@ -192,12 +263,13 @@ func UpdateAttribute(c *gin.Context) {
 		attribute.Name = *req.Name
 	}
 	if req.DataType != nil {
-		// Additional validation for DataType if it's being changed
-		if !models.ValidDataTypes[*req.DataType] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid DataType specified"})
+		// Convert to uppercase for consistent validation against models.ValidDataTypes
+		normalizedDataType := strings.ToUpper(*req.DataType)
+		if !models.ValidDataTypes[normalizedDataType] {
+			RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidEnumValue, "Invalid DataType specified", gin.H{"data_type": *req.DataType})
 			return
 		}
-		attribute.DataType = *req.DataType
+		attribute.DataType = normalizedDataType // Store the normalized uppercase version
 	}
 	if req.Description != nil {
 		attribute.Description = *req.Description
@@ -208,13 +280,19 @@ func UpdateAttribute(c *gin.Context) {
 	if req.IsPII != nil {
 		attribute.IsPII = *req.IsPII
 	}
-	// EntityID should not be changed via this endpoint.
 
 	if err := db.Save(&attribute).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update attribute definition: " + err.Error()})
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) {
+			if pqErr.Code == "23505" {
+				RespondWithError(c, http.StatusConflict, models.ErrorCodeDuplicateName, "Attribute with this name already exists for the entity.", gin.H{"name": attribute.Name, "entity_id": attribute.EntityID})
+				return
+			}
+		}
+		RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to update attribute definition.", nil)
 		return
 	}
-	c.JSON(http.StatusOK, attribute)
+	RespondWithSuccess(c, http.StatusOK, attribute)
 }
 
 // DeleteAttribute godoc
@@ -223,33 +301,33 @@ func UpdateAttribute(c *gin.Context) {
 // @Tags attributes
 // @Param   attribute_id     path   string     true  "Attribute Definition ID (UUID)"
 // @Success 204 "Successfully deleted attribute definition"
-// @Failure 400 {object} map[string]string "Invalid ID format"
-// @Failure 404 {object} map[string]string "Attribute definition not found"
-// @Failure 500 {object} map[string]string "Internal server error"
+// @Failure 400 {object} models.APIError "Bad Request (e.g., invalid Attribute ID format - see 'code' in response for specifics like INVALID_ID_FORMAT)"
+// @Failure 404 {object} models.APIError "Not Found (e.g., attribute not found - see 'code' in response for specifics like ATTRIBUTE_NOT_FOUND)"
+// @Failure 500 {object} models.APIError "Internal Server Error (see 'code' in response for specifics like INTERNAL_SERVER_ERROR)"
 // @Router /attributes/{attribute_id} [delete]
 func DeleteAttribute(c *gin.Context) {
 	attributeIDStr := c.Param("attribute_id")
 	attributeID, err := uuid.Parse(attributeIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Attribute ID format"})
+		RespondWithError(c, http.StatusBadRequest, models.ErrorCodeInvalidIDFormat, "Invalid Attribute ID format", gin.H{"id": attributeIDStr, "error": err.Error()})
 		return
 	}
 
 	db := database.GetDB()
-	var attribute models.AttributeDefinition
 	// Check if attribute exists before trying to delete
-	if err := db.First(&attribute, "id = ?", attributeID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Attribute definition not found"})
+	var attributeCheck models.AttributeDefinition
+	if err := db.First(&attributeCheck, "id = ?", attributeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			RespondWithError(c, http.StatusNotFound, models.ErrorCodeAttributeNotFound, "Attribute definition not found", gin.H{"attribute_id": attributeID})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find attribute definition: " + err.Error()})
+			RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to find attribute definition for deletion", nil)
 		}
 		return
 	}
 
 	if err := db.Delete(&models.AttributeDefinition{}, "id = ?", attributeID).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attribute definition: " + err.Error()})
+		RespondWithError(c, http.StatusInternalServerError, models.ErrorCodeInternalServerError, "Failed to delete attribute definition", nil)
 		return
 	}
-	c.Status(http.StatusNoContent)
+	RespondWithSuccess(c, http.StatusNoContent, nil)
 }
